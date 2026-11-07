@@ -1,0 +1,6 @@
+scripts:
+  setup: |
+    npm install
+    npm run types
+  test: npm run test
+  check: npm run typecheck

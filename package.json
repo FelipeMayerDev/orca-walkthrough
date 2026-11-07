@@ -1,0 +1,22 @@
+{
+  "name": "orca-walkthrough",
+  "private": true,
+  "type": "module",
+  "description": "An Orca plugin. Read a change in the order it makes sense: a port of herdr-walkthrough.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "types": "node scripts/orca-types.mjs",
+    "typecheck": "tsc -p .",
+    "test": "orca plugin test .",
+    "validate": "orca plugin validate .",
+    "check": "orca plugin check ."
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^5.9.3"
+  },
+  "config": {
+    "orcaVersion": "1.4.253"
+  }
+}

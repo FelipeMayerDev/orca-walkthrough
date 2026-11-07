@@ -1,0 +1,68 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "walkthrough",
+  "name": "Walkthrough",
+  "version": "0.1.0",
+  "description": "Read a change in the order it makes sense: steps grouped and ordered by purpose, each explained beside its code, with what no step covers.",
+  "author": {
+    "name": "focky"
+  },
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.246"
+  },
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "walkthrough",
+        "title": "Walkthrough",
+        "icon": "book",
+        "entry": "panel/index.html"
+      }
+    ],
+    "settings": [
+      {
+        "key": "model",
+        "title": "Model",
+        "description": "Which Claude model reads the diff. Haiku is fine for most changes.",
+        "type": "string",
+        "enum": ["haiku", "sonnet", "opus"],
+        "enumLabels": ["Haiku — fast and cheap", "Sonnet — better grouping on large or subtle changes", "Opus — the most careful reading, the highest cost"],
+        "default": "haiku"
+      },
+      {
+        "key": "language",
+        "title": "Language",
+        "description": "The language the walkthrough is written in.",
+        "type": "string",
+        "enum": ["en", "pt", "tr", "de", "fr", "es", "it", "nl", "pl", "uk", "ru", "ja", "ko", "zh"],
+        "enumLabels": ["English", "Português", "Türkçe", "Deutsch", "Français", "Español", "Italiano", "Nederlands", "Polski", "Українська", "Русский", "日本語", "한국어", "简体中文"],
+        "default": "en"
+      },
+      {
+        "key": "preferences",
+        "title": "Preferences",
+        "description": "Your own wishes for every walkthrough: tone, emphasis, order, what to dwell on or leave out. Added to every prompt.",
+        "type": "string",
+        "multiline": true,
+        "placeholder": "For example: keep step titles short; dwell on API changes; skip UI copy.",
+        "default": ""
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "workspace:read"
+    },
+    {
+      "kind": "agent:read"
+    },
+    {
+      "kind": "settings:own"
+    }
+  ]
+}
