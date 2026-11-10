@@ -22,6 +22,7 @@ import { longHash, shortHash } from './engine/hash'
 import { mergeRead, markStep, unmarkStep, type ReadRecord } from './engine/read'
 import { jobScript, readOutcome, isRunCommand } from './engine/job'
 import { agentVersion as agentVersionOf } from './engine/agents'
+import { displayEnv } from './engine/clipboard'
 import { parseTranscript, projectSlug, jsonPath, TRANSCRIPTS, taskKey, taskCacheKey, type Task } from './engine/task'
 import { excludesLine, parseMeta, snapshotArgs, splitRecent, turnEnv, turnPaths, writeMeta, type TurnMeta } from './engine/turns'
 
@@ -64,17 +65,39 @@ export const repository = (folder: string) => repoAt(exec, folder)
 
 /**
  * Puts text on the system clipboard. wl-copy on Wayland, xclip on X11, pbcopy on macOS.
+ * The worker's environment may lack the display names entirely (it is the
+ * daemon's child, not the person's shell), so the wayland or X11 socket the
+ * session actually has is discovered and passed along.
  */
 export async function copyText(text: string): Promise<void> {
   const path = `${dataDir()}/clipboard.md`
   await write(path, text)
-  const r = await exec('sh', ['-c', COPY, 'sh', path])
+  const r = await exec('sh', ['-c', COPY, 'sh', path], { env: await displayAdditions() })
   if (r.code !== 0) throw new Error((r.stderr || 'No clipboard program found (wl-copy, xclip or pbcopy).').trim())
+}
+
+/** The display names the copy command needs beyond the worker's own environment. */
+async function displayAdditions(): Promise<Record<string, string>> {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const candidates = [process.env.XDG_RUNTIME_DIR, `/run/user/${uid ?? 1000}`].filter((p): p is string => Boolean(p))
+  let runtime: { path: string; entries: string[] } | null = null
+  for (const path of [...new Set(candidates)]) {
+    const entries = await readdir(path).catch(() => null)
+    if (entries) {
+      runtime = { path, entries }
+      break
+    }
+  }
+  const x11Dir = await readdir('/tmp/.X11-unix').catch(() => undefined)
+  return displayEnv({ platform: process.platform, uid, env: process.env as Record<string, string | undefined>, runtime, x11Dir })
 }
 
 // The text is UTF-8, said so to each program: started from an app, a clipboard
 // tool may read the bytes with the wrong locale and "ş" or "日" land garbled.
-const COPY = 'if command -v pbcopy >/dev/null; then LC_ALL=en_US.UTF-8 pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy --type "text/plain;charset=utf-8" < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard -target UTF8_STRING < "$1"; else echo "No clipboard program found (wl-copy, xclip or pbcopy)." >&2; exit 1; fi'
+// wl-copy and xclip fork and hold the clipboard from a child of their own —
+// their output goes to /dev/null, or that child would keep the caller's pipes
+// open forever (the caller waits for them, not for the exit).
+const COPY = 'if command -v pbcopy >/dev/null; then LC_ALL=en_US.UTF-8 pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy --type "text/plain;charset=utf-8" < "$1" >/dev/null 2>&1; elif command -v xclip >/dev/null; then xclip -selection clipboard -target UTF8_STRING < "$1" >/dev/null 2>&1; else echo "No clipboard program found (wl-copy, xclip or pbcopy)." >&2; exit 1; fi'
 
 /** Whether an agent's CLI can be started: its version, or null. */
 export function agentVersion(command: string): Promise<string | null> {

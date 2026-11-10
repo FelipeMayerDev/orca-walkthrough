@@ -7,6 +7,7 @@ import { jobScript, readOutcome, isRunCommand } from './engine/job'
 import { agentOf, modelOf, agentsEnabled } from './engine/agents'
 import { parseCatalog, catalogFor, hermesModels, hermesDefault, zcodeModels } from './engine/catalog'
 import { agentKeysFrom } from './engine/orcaConfig'
+import { displayEnv } from './engine/clipboard'
 import { cacheKey } from './engine/cache'
 import type { DigestFile } from './engine/digest'
 import { buildDigest } from './engine/digest'
@@ -281,6 +282,30 @@ test('hermes models: the picker cache, the configured default marked', () => {
   assert.deepEqual(hermesModels({}, ''), [])
   assert.equal(hermesDefault('x\nmodel:\n  default: anthropic/claude-opus-4.6\n'), 'anthropic/claude-opus-4.6')
   assert.equal(hermesDefault('defaults: nope'), '')
+})
+
+test('display env: the sockets the session has, the names the worker lacks', () => {
+  // A full environment needs nothing added.
+  assert.deepEqual(displayEnv({ platform: 'linux', uid: 1000, env: { XDG_RUNTIME_DIR: '/run/user/1000', WAYLAND_DISPLAY: 'wayland-1' }, runtime: { path: '/run/user/1000', entries: ['wayland-0', 'wayland-1'] } }), {})
+  // The worker's scrubbed environment: runtime and socket are derived, the
+  // runtime dir is overridden only when the env's own name would not list.
+  assert.deepEqual(
+    displayEnv({ platform: 'linux', uid: 1000, env: {}, runtime: { path: '/run/user/1000', entries: ['wayland-0', 'wayland-1', 'pulse'] } }),
+    { XDG_RUNTIME_DIR: '/run/user/1000', WAYLAND_DISPLAY: 'wayland-0' }
+  )
+  // An env value that lists fine is kept; only the socket is added.
+  assert.deepEqual(
+    displayEnv({ platform: 'linux', uid: 1000, env: { XDG_RUNTIME_DIR: '/run/user/1000' }, runtime: { path: '/run/user/1000', entries: ['wayland-1'] } }),
+    { WAYLAND_DISPLAY: 'wayland-1' }
+  )
+  // No wayland socket, no DISPLAY: the X socket names the display.
+  assert.deepEqual(
+    displayEnv({ platform: 'linux', uid: 1000, env: {}, runtime: { path: '/run/user/1000', entries: ['pulse'] }, x11Dir: ['X0', 'X1'] }),
+    { XDG_RUNTIME_DIR: '/run/user/1000', DISPLAY: ':0' }
+  )
+  // Nothing discoverable: nothing invented.
+  assert.deepEqual(displayEnv({ platform: 'linux', uid: 1000, env: {}, runtime: null }), {})
+  assert.deepEqual(displayEnv({ platform: 'darwin', uid: 501, env: {}, runtime: null }), {})
 })
 
 test('cache keys: another agent is another walkthrough, claude keeps its names', () => {
