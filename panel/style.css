@@ -1,0 +1,268 @@
+      :root {
+        --gap: 12px;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        font: 13px/1.5 var(--sans);
+        -webkit-font-smoothing: antialiased;
+        color: var(--orca-foreground);
+        background: var(--orca-card);
+      }
+
+      header {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: var(--gap) var(--gap) 10px;
+        border-bottom: 1px solid var(--orca-border);
+      }
+      .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 22px; }
+      h1 { margin: 0; font-size: 14px; font-weight: 600; }
+      #repo {
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: var(--orca-muted-foreground); font-size: 11px;
+        border: none; background: none; padding: 0; cursor: pointer;
+        text-decoration: underline dotted; text-underline-offset: 2px;
+      }
+      #repo:hover { color: var(--orca-foreground); }
+      .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+      /* Icon buttons: one act each, no words. The icons inside are drawn
+         (see render.ts), never font glyphs that vary with the system. */
+      .icon-btn {
+        flex: none;
+        width: 27px; height: 26px;
+        display: inline-flex; align-items: center; justify-content: center;
+        padding: 0;
+      }
+      .icon-btn svg { display: block; }
+      .icon-btn.primary { border-color: transparent; background: var(--orca-primary); color: var(--orca-primary-foreground, #fff); }
+      .icon-btn.ghost { background: transparent; color: var(--orca-muted-foreground); }
+      .icon-btn.ghost:hover { color: var(--orca-foreground); }
+      .icon-btn:disabled { opacity: 0.5; cursor: default; }
+      .icon-btn[aria-pressed='true'] { color: var(--orca-primary); border-color: var(--orca-primary); background: none; }
+
+      /* Model and language, behind the gear. */
+      .settings {
+        display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+      }
+      .settings[hidden] { display: none; }
+      .settings label {
+        display: flex; gap: 5px; align-items: center;
+        font-size: 10.5px; color: var(--orca-muted-foreground);
+      }
+      .settings select { flex: 1 1 120px; min-width: 0; }
+      select, button, input[type='text'] {
+        font: inherit; color: inherit;
+        padding: 3px 8px; border-radius: 6px;
+        border: 1px solid var(--orca-border);
+        background: var(--orca-background);
+      }
+      select { max-width: 100%; min-width: 0; }
+      select.scope { flex: 1 1 160px; }
+      button { cursor: pointer; }
+      button.ghost { background: transparent; }
+      button:active { transform: translateY(0.5px); }
+
+      #status {
+        min-height: 16px;
+        color: var(--orca-muted-foreground);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      #status .bad { color: var(--orca-destructive); }
+      #status a { color: var(--orca-primary); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+
+      main { flex: 1; overflow-y: auto; padding: 12px var(--gap) 48px; }
+      .center { max-width: 720px; margin: 24px auto; text-align: center; color: var(--orca-muted-foreground); }
+      .center h2 { color: var(--orca-foreground); font-size: 14px; margin: 0 0 6px; }
+      .center p { margin: 6px 0; }
+
+      /* The setup screen: what the change is, the task, the button. */
+      .setup { max-width: 640px; margin: 4px auto; display: flex; flex-direction: column; gap: 14px; }
+      .setup .counts { color: var(--orca-muted-foreground); font-size: 12px; }
+      .setup .counts b { color: var(--orca-foreground); font-weight: 600; }
+      .task-box { display: flex; flex-direction: column; gap: 6px; }
+      .task-box .modes { display: flex; gap: 6px; flex-wrap: wrap; }
+      .task-box .modes button { border-radius: 999px; }
+      .task-box .modes button[aria-pressed='true'] { border-color: var(--orca-primary); color: var(--orca-primary); }
+      .task-text {
+        box-sizing: border-box; width: 100%; min-height: 64px; resize: vertical;
+        font: inherit; padding: 6px 8px; border-radius: 6px;
+        border: 1px solid var(--orca-border); background: var(--orca-background); color: inherit;
+      }
+      .task-found {
+        padding: 8px 10px; border-radius: 6px; background: var(--orca-muted);
+        color: var(--orca-muted-foreground); font-size: 12px; white-space: pre-wrap;
+        max-height: 140px; overflow-y: auto;
+      }
+      .task-found b { color: var(--orca-foreground); font-weight: 600; }
+      .generate-row { display: flex; gap: 8px; align-items: center; }
+      .generate-row .cost { color: var(--orca-muted-foreground); font-size: 11px; }
+      .file-list { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+      .file-list .path { font-family: var(--mono); font-size: 11px; }
+      .file-list .dim { color: var(--orca-muted-foreground); }
+      details.files > summary { cursor: pointer; color: var(--orca-muted-foreground); font-size: 12px; }
+      details.files[open] { display: flex; flex-direction: column; gap: 6px; }
+
+      /* Generating. */
+      .generating { max-width: 480px; margin: 32px auto; display: flex; flex-direction: column; gap: 10px; text-align: center; }
+      .bar { height: 4px; border-radius: 2px; background: var(--orca-muted); overflow: hidden; }
+      .bar > div { height: 100%; background: var(--orca-primary); transition: width 1s linear; }
+
+      /* The walkthrough. */
+      .walk { display: flex; flex-direction: column; gap: 12px; }
+      .walk .head { display: flex; flex-direction: column; gap: 4px; }
+      .walk h2 { margin: 0; font-size: 16px; line-height: 1.35; }
+      .walk .summary { margin: 0; color: var(--orca-muted-foreground); font-size: 12.5px; }
+      .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+      .chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 1px 8px; border-radius: 999px; font-size: 10.5px;
+        background: var(--orca-muted); color: var(--orca-muted-foreground);
+      }
+      .chip.warn { color: #b08800; background: color-mix(in srgb, #b08800 12%, transparent); }
+      .chip.plain { background: none; padding: 1px 0; }
+
+      /* The step being read. */
+      .step { display: flex; flex-direction: column; gap: 8px; }
+      .step .title-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+      .step h3 { margin: 0; font-size: 14px; line-height: 1.4; flex: 1; }
+      .step .text { margin: 0; font-size: 13px; }
+      .step .mark { border: none; background: none; color: var(--orca-muted-foreground); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+      .step .mark:hover { background: var(--orca-muted); }
+      .step .mark.on { color: var(--orca-primary); }
+
+      .note {
+        display: flex; gap: 8px; align-items: baseline;
+        padding: 6px 10px; border-radius: 6px; background: var(--orca-muted);
+        font-size: 12px;
+      }
+      .note b { flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--orca-muted-foreground); }
+      .note.gap b, .note.untested b { color: var(--orca-destructive); }
+      .note.choice b { color: var(--orca-primary); }
+
+      .asks-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+      .ask-chip {
+        font-size: 11px; padding: 2px 8px; border-radius: 999px; cursor: pointer;
+        background: var(--orca-muted); color: var(--orca-muted-foreground); border: none;
+      }
+      .ask-chip.seen { color: #1a7f37; background: color-mix(in srgb, #1a7f37 10%, transparent); }
+      .ask-chip.partly { color: #b08800; background: color-mix(in srgb, #b08800 12%, transparent); }
+      .ask-chip.absent { color: var(--orca-destructive); background: color-mix(in srgb, var(--orca-destructive) 10%, transparent); }
+
+      /* Code blocks. */
+      .code { border: 1px solid var(--orca-border); border-radius: 8px; overflow: hidden; }
+      .code > .code-head {
+        display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+        padding: 5px 10px; border-bottom: 1px solid var(--orca-border);
+        background: color-mix(in srgb, var(--orca-muted) 55%, transparent);
+        font-size: 11px; color: var(--orca-muted-foreground);
+      }
+      .code > .code-head .path { font-family: var(--mono); color: var(--orca-foreground); }
+      .code > .code-head .count { margin-left: auto; font-variant-numeric: tabular-nums; }
+      .code > .code-head .count .a { color: #1a7f37; }
+      .code > .code-head .count .d { color: var(--orca-destructive); }
+      .code pre {
+        margin: 0; padding: 6px 0; overflow-x: auto;
+        font: 11.5px/1.55 var(--mono);
+      }
+      .code .ln {
+        display: flex; gap: 0;
+        white-space: pre;
+      }
+      .code .no {
+        flex: none; min-width: 34px; padding: 0 8px 0 10px; text-align: right;
+        color: var(--orca-muted-foreground); opacity: 0.7;
+        font-variant-numeric: tabular-nums;
+        user-select: none;
+      }
+      .code .tx { flex: 1; padding-right: 10px; }
+      .code .ln.plus { background: color-mix(in srgb, #1a7f37 13%, transparent); }
+      .code .ln.plus .tx { color: #1a7f37; }
+      .code .ln.minus { background: color-mix(in srgb, var(--orca-destructive) 11%, transparent); }
+      .code .ln.minus .tx { color: var(--orca-destructive); }
+      .code .ln.meta .tx { color: var(--orca-muted-foreground); font-style: italic; }
+      .code .gap-line { padding: 2px 10px; color: var(--orca-muted-foreground); font-size: 10px; user-select: none; }
+      /* One labelled excerpt inside a file card: the lines it covers, the
+         function it sits in, what it moved. */
+      .code .hunk + .hunk { border-top: 1px solid var(--orca-border); }
+      .code .hunk-head {
+        display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+        padding: 3px 10px;
+        background: color-mix(in srgb, var(--orca-muted) 35%, transparent);
+        font-size: 10.5px; color: var(--orca-muted-foreground);
+      }
+      .code .hunk-head .range { color: var(--orca-foreground); font-variant-numeric: tabular-nums; }
+      .code .hunk-head .count { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+      /* The files a step summarizes, one chip each. */
+      .files-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+      .file-chip {
+        display: inline-flex; gap: 6px; align-items: baseline;
+        max-width: 100%;
+        border: 1px solid var(--orca-border); border-radius: 999px;
+        background: var(--orca-background);
+        padding: 1px 9px; cursor: pointer;
+        font: inherit; color: inherit;
+      }
+      .file-chip:hover { border-color: var(--orca-primary); }
+      .file-chip .path {
+        font-family: var(--mono); font-size: 10.5px;
+        max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .file-chip .a { color: #1a7f37; font-size: 10px; font-variant-numeric: tabular-nums; }
+      .file-chip .d { color: var(--orca-destructive); font-size: 10px; font-variant-numeric: tabular-nums; }
+      .file-chip.more { border-style: dashed; cursor: default; color: var(--orca-muted-foreground); font-size: 10.5px; }
+
+      /* Not covered. */
+      .uncovered { display: flex; flex-direction: column; gap: 8px; }
+      .uncovered > h3 { margin: 12px 0 0; font-size: 12px; color: var(--orca-muted-foreground); }
+      .uc-file { border: 1px solid var(--orca-border); border-radius: 8px; }
+      .uc-file > button {
+        display: flex; gap: 8px; align-items: baseline; width: 100%;
+        border: none; background: none; cursor: pointer; padding: 6px 10px;
+        font: inherit; text-align: left; color: inherit;
+      }
+      .uc-file > button .path { font-family: var(--mono); font-size: 11.5px; }
+      .uc-file > button .note { flex: 1; background: none; padding: 0; font-size: 11.5px; color: var(--orca-muted-foreground); }
+      .uc-file .body { border-top: 1px solid var(--orca-border); display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+
+      /* Task page. */
+      .task-page { display: flex; flex-direction: column; gap: 10px; }
+      .task-page h3 { margin: 0; font-size: 13px; }
+      .ask-row { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 8px; background: var(--orca-muted); }
+      .ask-row .top { display: flex; gap: 8px; align-items: baseline; }
+      .ask-row .mark { flex: none; font-size: 12px; }
+      .ask-row .mark.seen { color: #1a7f37; }
+      .ask-row .mark.partly { color: #b08800; }
+      .ask-row .mark.absent { color: var(--orca-destructive); }
+      .ask-row .where { color: var(--orca-muted-foreground); font-size: 11px; }
+      .ask-row .where button { border: none; background: none; color: var(--orca-primary); cursor: pointer; padding: 0; font-size: 11px; text-decoration: underline; text-underline-offset: 2px; }
+
+      footer {
+        flex: none; padding: 4px var(--gap);
+        border-top: 1px solid var(--orca-border);
+        color: var(--orca-muted-foreground); font-size: 10.5px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      footer kbd {
+        font: inherit; padding: 0 3px; border-radius: 4px;
+        border: 1px solid var(--orca-border);
+      }
+      [hidden] { display: none !important; }
+
+
+      /* A part's heading in the one-document walkthrough. */
+      .walk .part-head { display: flex; flex-direction: column; gap: 3px; margin: 2px 0 -4px; }
+      .walk .part-head h3 {
+        margin: 0; font-size: 13px; color: var(--orca-foreground);
+        padding-bottom: 4px; border-bottom: 1px solid var(--orca-border);
+      }
+      .walk .part-head .blurb { margin: 0; color: var(--orca-muted-foreground); font-size: 12px; }

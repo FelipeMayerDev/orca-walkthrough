@@ -5,6 +5,7 @@
 //   pointers/<place>.json  the one shown last for a repository and source
 //   jobs/<place>/          a generation in progress (run.sh, prompt, answer)
 //   read/<repo>.json       the hunks read in a repository, by content
+//   turns/<repo>/<turn>/   an agent turn's snapshots (index, objects, meta.json)
 
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -13,16 +14,20 @@ import { join } from 'node:path'
 
 import { run, type Exec } from './engine/exec'
 import { buildDigest, type Digest, type DigestFile } from './engine/digest'
-import { loadSections, repoAt, sourceKey, describe, git, type Repo, type Source } from './engine/sources'
+import { loadSections, repoAt, sourceKey, describe, bigUntracked, type Repo, type Source } from './engine/sources'
 import { buildPrompt } from './engine/prompt'
 import { normalize, schemaFor, VERSION, type Walkthrough } from './engine/walkthrough'
 import { cacheKey, codeKey, placeKey, deadline, MAX_PROMPT_CHARS } from './engine/cache'
-import { longHash } from './engine/hash'
+import { longHash, shortHash } from './engine/hash'
 import { mergeRead, markStep, unmarkStep, type ReadRecord } from './engine/read'
 import { jobScript, readOutcome, isRunCommand } from './engine/job'
+import { agentVersion as agentVersionOf } from './engine/agents'
 import { parseTranscript, projectSlug, jsonPath, TRANSCRIPTS, taskKey, taskCacheKey, type Task } from './engine/task'
+import { excludesLine, parseMeta, snapshotArgs, splitRecent, turnEnv, turnPaths, writeMeta, type TurnMeta } from './engine/turns'
 
 const MAX_ENTRIES = 200
+// Turns kept per repository: older ones (and their private objects) are deleted.
+const MAX_TURNS = 20
 // A parsed diff is kept this long: a panel navigating steps asks for hunks in
 // bursts, and the agent's edits arrive slower than that.
 const DIFF_TTL = 2500
@@ -71,12 +76,9 @@ export async function copyText(text: string): Promise<void> {
 // tool may read the bytes with the wrong locale and "ş" or "日" land garbled.
 const COPY = 'if command -v pbcopy >/dev/null; then LC_ALL=en_US.UTF-8 pbcopy < "$1"; elif command -v wl-copy >/dev/null; then wl-copy --type "text/plain;charset=utf-8" < "$1"; elif command -v xclip >/dev/null; then xclip -selection clipboard -target UTF8_STRING < "$1"; else echo "No clipboard program found (wl-copy, xclip or pbcopy)." >&2; exit 1; fi'
 
-/** Whether the `claude` CLI can be started: its version, or null. */
-export async function claudeVersion(): Promise<string | null> {
-  try {
-    const r = await exec('claude', ['--version'])
-    return r.code === 0 ? r.stdout.trim() : null
-  } catch { return null }
+/** Whether an agent's CLI can be started: its version, or null. */
+export function agentVersion(command: string): Promise<string | null> {
+  return agentVersionOf(exec, command)
 }
 
 export type Diff = Digest & { sk: string; what: string; unread: { path: string; why: string }[] }
@@ -88,7 +90,7 @@ export async function readDiff(repo: Repo, source: Source): Promise<Diff> {
   const sk = sourceKey(source)
   const cached = diffCache.get(`${repo.top}\n${sk}`)
   if (cached && Date.now() - cached.at < DIFF_TTL) return cached.diff
-  const { sections, unread } = await loadSections(exec, repo.top, source)
+  const { sections, unread } = await loadSections(exec, repo.top, source, { dataRoot: dataDir() })
   const digest = buildDigest(sections)
   const files = [...digest.files]
   for (const u of unread) files.push({ path: u.path, oldPath: null, status: 'added', binary: false, scope: 'unread', hunks: [], generated: false, unread: u.why })
@@ -98,26 +100,109 @@ export async function readDiff(repo: Repo, source: Source): Promise<Diff> {
   return diff
 }
 
-/** The key the walkthrough of this diff would have, in this model and language, under these preferences, matched against this task. */
-export const keyFor = (repo: Repo, diff: Diff, model: string, language: string, preferences = '', task: Task | null = null): string =>
-  cacheKey({ top: repo.top, source: diff.sk, model, language, preferences, files: diff.files, task: taskCacheKey(task) })
+/** The key the walkthrough of this diff would have, by this agent, in this model and language, under these preferences, matched against this task. */
+export const keyFor = (repo: Repo, diff: Diff, agent: string, model: string, language: string, preferences = '', task: Task | null = null): string =>
+  cacheKey({ top: repo.top, source: diff.sk, agent, model, language, preferences, files: diff.files, task: taskCacheKey(task) })
 
 /**
  * What people typed into Claude Code sessions working in a repository since
- * `since` (ms), oldest first: the task of a change made by an agent. Read from
- * Claude Code's transcripts (its folder names the project by its path; a
- * session started in a subfolder counts too).
+ * `since` (ms) until `until` (ms; 0 for no bound), oldest first: the task of a
+ * change made by an agent, or of one turn. Read from Claude Code's transcripts
+ * (its folder names the project by its path; a session started in a subfolder
+ * counts too).
  */
-export async function transcriptMessages(top: string, since: number): Promise<{ at: number; text: string; session: string | null }[]> {
+export async function transcriptMessages(top: string, since: number, until = 0): Promise<{ at: number; text: string; session: string | null }[]> {
   // Claude Code shortens very long folder names; the prefix finds them, and each line's cwd decides.
   const prefix = projectSlug(top).slice(0, 120)
   const r = await exec('sh', ['-c', TRANSCRIPTS, prefix, String(Math.floor(since / 1000)), jsonPath(top)]).catch(() => null)
-  return parseTranscript(r?.stdout ?? '', { top, since })
+  return parseTranscript(r?.stdout ?? '', { top, since, until })
+}
+
+// ── turns ────────────────────────────────────────────────────────────────────
+//
+// Snapshots write into this data folder only — a private index and objects per
+// turn — so the repository's .git is never written (see engine/turns.ts).
+
+const turnFolder = (top: string, id: string): string => turnPaths(dataDir(), top, id).dir
+
+/** A turn on disk, or null: an unknown or half-written id is no turn. */
+export async function lookupTurn(top: string, id: string): Promise<TurnMeta | null> {
+  const text = await readFile(`${turnFolder(top, id)}/meta.json`, 'utf8').catch(() => null)
+  return parseMeta(text)
+}
+
+/**
+ * The working tree as a git tree now, written into the turn's private index
+ * and objects. Null when git failed: a snapshot is never worth holding the
+ * worker up for, and a turn missing one simply has no diff (or no end).
+ */
+async function snapshotTree(repo: Repo, id: string): Promise<string | null> {
+  try {
+    const turn = turnPaths(dataDir(), repo.top, id)
+    await mkdir(`${turn.dir}/objects`, { recursive: true })
+    const big = await bigUntracked(exec, repo.top)
+    await write(`${turn.dir}/exclude`, big.map(excludesLine).join('\n'))
+    const env = turnEnv(repo.gitDir, turn.dir)
+    const add = await exec('git', ['--no-optional-locks', ...snapshotArgs(`${turn.dir}/exclude`)], { cwd: repo.top, env })
+    if (add.code !== 0) return null
+    const tree = await exec('git', ['--no-optional-locks', 'write-tree'], { cwd: repo.top, env })
+    const hash = tree.stdout.trim()
+    return tree.code === 0 && /^[0-9a-f]{40}$/.test(hash) ? hash : null
+  } catch { return null }
+}
+
+export type OpenTurn = { id: string; startedAt: number; terminalId: string | null; workspaceId: string | null; agent: string | null }
+
+/** Opens a turn: the folder, its meta, the tree of the working tree as the agent got to work. */
+export async function openTurn(repo: Repo, turn: OpenTurn): Promise<TurnMeta | null> {
+  const beforeTree = await snapshotTree(repo, turn.id)
+  const meta: TurnMeta = {
+    id: turn.id, top: repo.top, startedAt: turn.startedAt, endedAt: null, outcome: null, complete: false,
+    terminalId: turn.terminalId, workspaceId: turn.workspaceId, agent: turn.agent, beforeTree, afterTree: null,
+  }
+  await write(`${turnFolder(repo.top, turn.id)}/meta.json`, writeMeta(meta))
+  await recentTurns(repo.top)
+  return meta
+}
+
+/**
+ * Ends a turn: the second snapshot, when and how it ended. `snapshot: false`
+ * closes without one — an orphaned turn ends at its next prompt, and that
+ * tree would include the person's own edits made after the interruption.
+ * An unknown or already-ended id is left as it is.
+ */
+export async function closeTurn(repo: Repo, id: string, endedAt: number, outcome: string | null, snapshot = true): Promise<TurnMeta | null> {
+  const meta = await lookupTurn(repo.top, id)
+  if (!meta || meta.endedAt) return meta
+  const afterTree = snapshot ? await snapshotTree(repo, id) : null
+  const next: TurnMeta = { ...meta, endedAt, outcome, afterTree, complete: Boolean(meta.beforeTree && afterTree) }
+  await write(`${turnFolder(repo.top, id)}/meta.json`, writeMeta(next))
+  await recentTurns(repo.top)
+  return next
+}
+
+/**
+ * The repository's recorded turns, newest first, past ones deleted with their
+ * objects: twenty per repository, so a busy day cannot fill the disk. Reading
+ * is what evicts — callers get the pruning for free.
+ */
+export async function recentTurns(top: string): Promise<TurnMeta[]> {
+  const root = `${dataDir()}/turns/${shortHash(top)}`
+  const names = await readdir(root).catch(() => [] as string[])
+  const metas = (await Promise.all(names.map(async (name) => {
+    const text = await readFile(`${root}/${name}/meta.json`, 'utf8').catch(() => null)
+    return parseMeta(text)
+  }))).filter((m): m is TurnMeta => m !== null)
+  const { kept, drop } = splitRecent(metas, MAX_TURNS)
+  for (const gone of drop) await rm(`${root}/${gone.id}`, { recursive: true, force: true }).catch(() => undefined)
+  return kept
 }
 
 export type Entry = {
   version: number
   key: string
+  /** Which agent's CLI wrote this; 'claude' for every walkthrough made before there were others. */
+  agent: string
   code: string
   model: string
   language: string
@@ -213,7 +298,7 @@ export async function jobOf(repo: Repo, sk: string): Promise<Job | null> {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo: Repo, diff: Diff, { key, model, language, prompt, source, task = null, before = [] }: { key: string; model: string; language: string; prompt: { system: string; prompt: string }; source: Source; task?: Task | null; before?: string[] }): Promise<Job> {
+export async function startJob(repo: Repo, diff: Diff, { key, agent = 'claude', model, language, prompt, source, task = null, before = [] }: { key: string; agent?: string; model: string; language: string; prompt: { system: string; prompt: string }; source: Source; task?: Task | null; before?: string[] }): Promise<Job> {
   await ensureDirs()
   const dir = jobDir(placeKey(repo.top, diff.sk))
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -221,7 +306,7 @@ export async function startJob(repo: Repo, diff: Diff, { key, model, language, p
   await rm(dir, { recursive: true, force: true }).catch(() => undefined)
   await mkdir(dir, { recursive: true })
   const meta = {
-    key, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, started: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
+    key, agent, code: codeKey(diff.files), model, language, top: repo.top, source, sk: diff.sk, startedAt: Date.now(), deadline: Date.now() + deadline(diff.hunkCount),
     idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, before,
     // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
     task: task ? { ...task, key: taskKey(task) } : null,
@@ -229,11 +314,11 @@ export async function startJob(repo: Repo, diff: Diff, { key, model, language, p
   await writeFile(`${dir}/system.txt`, prompt.system, 'utf8')
   await writeFile(`${dir}/prompt.txt`, prompt.prompt, 'utf8')
   await writeFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task))), 'utf8')
-  await writeFile(`${dir}/run.sh`, jobScript(), 'utf8')
+  await writeFile(`${dir}/run.sh`, jobScript(agent), 'utf8')
   await writeFile(`${dir}/meta.json`, JSON.stringify(meta), 'utf8')
   // Detached: the run outlives the worker, and Orca with it.
-  // run.sh stops claude itself at the deadline, so a hung run ends even with no one watching.
-  const seconds = String(Math.ceil((meta.deadline - meta.started) / 1000))
+  // run.sh stops the agent itself at the deadline, so a hung run ends even with no one watching.
+  const seconds = String(Math.ceil((meta.deadline - meta.startedAt) / 1000))
   const child = spawn('sh', [`${dir}/run.sh`, model, seconds], { detached: true, stdio: 'ignore' })
   child.unref()
   return { dir, meta, done: false, code: null }
@@ -256,10 +341,10 @@ async function stopRun(dir: string): Promise<void> {
   if (pid) await exec('kill', [pid]).catch(() => undefined)
 }
 
-/** Whether a job's claude is still running (a reboot leaves a job with no answer and no process). */
+/** Whether a job's agent is still running (a reboot leaves a job with no answer and no process). */
 export async function alive(job: Job): Promise<boolean> {
   job.pid ??= (await readFile(`${job.dir}/pid`, 'utf8').catch(() => null))?.trim() || null
-  if (!job.pid) return Date.now() - job.meta.started < 10_000 // not started yet
+  if (!job.pid) return Date.now() - (job.meta.startedAt ?? job.meta.started ?? 0) < 10_000 // not started yet
   return (await runPid(job.dir, job.pid)) !== null
 }
 
@@ -283,11 +368,11 @@ export async function finishJob(job: Job): Promise<Entry | null> {
   }
   try {
     const read = (name: string): Promise<string | null> => readFile(`${claimed}/${name}`, 'utf8').catch(() => null)
-    const { raw, cost } = readOutcome({ out: await read('out.json'), err: await read('err.txt'), code: job.code })
+    const { raw, cost } = readOutcome(job.meta.agent ?? 'claude', { out: await read('out.json'), err: await read('err.txt'), code: job.code })
     const walkthrough = normalize(raw, job.meta.idByAlias ?? {}, job.meta.digestFiles ?? [], { asks: Boolean(job.meta.task) })
     const { key, model, language, top, source, sk } = job.meta
     // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
-    const entry: Entry = { version: VERSION, key, code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - job.meta.started, cost, walkthrough, before: job.meta.before ?? [], task: job.meta.task ?? null }
+    const entry: Entry = { version: VERSION, key, agent: job.meta.agent ?? 'claude', code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - (job.meta.startedAt ?? job.meta.started ?? Date.now()), cost, walkthrough, before: job.meta.before ?? [], task: job.meta.task ?? null }
     await ensureDirs()
     await write(entryPath(key), JSON.stringify(entry))
     await write(pointerPath(placeKey(top, sk)), JSON.stringify({ key, top, source: sk }))

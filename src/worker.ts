@@ -1,36 +1,103 @@
 // The walkthrough worker. The panel asks; this reads git, gh and the stored
-// walkthroughs, and runs generations of `claude -p` in the background.
+// walkthroughs, and runs generations of `claude -p` in the background. Between
+// requests it listens to agents starting and stopping, and snapshots each turn
+// of theirs into the data folder (see engine/turns.ts).
 
-import type { OrcaWorkerApi } from 'orca/worker'
+import type { OrcaWorkerApi, PluginEvents } from 'orca/worker'
 import './protocol'
+import { homedir } from 'node:os'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { matchFocused } from './workspace'
 import * as store from './store'
 import {
   currentHead, defaultBase, baseChoices, recentCommits, pullRequests, commitMessage, taskSince,
-  sourceKey, type Source,
+  sourceKey, type Repo, type Source,
 } from './engine/sources'
 import type { Task } from './engine/task'
+import { stepTurn, turnId, turnKey, type TurnEvent, type TurnStates } from './engine/turns'
 import { overlay, overlayAsks } from './engine/walkthrough'
 import { indexHunks } from './engine/hunks'
 import { estimateTokens, MAX_PROMPT_CHARS } from './engine/cache'
 import { isRead } from './engine/read'
 import { resolveTask, taskKey, taskCacheKey, TASK_MODES, type TaskMode } from './engine/task'
-import { DEFAULT_MODEL, modelOf } from './engine/job'
+import { AGENTS, DEFAULT_AGENT, agentOf, modelOf, agentVersion, agentsEnabled, type AgentDef } from './engine/agents'
+import { readCatalog, catalogFor, catalogPath, hermesModels, hermesDefault, zcodeModels, type Catalog } from './engine/catalog'
+import { enabledAgents } from './engine/orcaConfig'
 import { DEFAULT_LANGUAGE } from './engine/languages'
 import { toMarkdown } from './engine/export'
 import type {
   AskOut, DiffAnswer, FileSummary, GenerateAnswer, PollAnswer, ScopesAnswer, StateAnswer,
-  StepOut, ViewAnswer, EntryMeta, HunkRef, HunkLines, UncoveredOut,
+  StepOut, TurnSummary, ViewAnswer, EntryMeta, HunkRef, HunkLines, UncoveredOut,
 } from './protocol'
 
 const invalid = (message: string): Error => Object.assign(new Error(message), { code: 'invalid_params' })
 
-let claudeChecked: string | null | undefined
+// Prompts land in a transcript a moment before (or after) the agent's status
+// says it started; a turn's prompts are read with this much slack on each side.
+const TURN_SLACK = 5000
 
-async function settings(orca: OrcaWorkerApi): Promise<{ model: string; language: string; preferences: string }> {
+let agentsChecked: { key: string; name: string; available: boolean; models: { key: string; label: string; isDefault: boolean }[] }[] | undefined
+let modelsCatalog: Catalog | null = null
+
+/** The model to run with: the requested one when the agent offers it, else
+ *  the account's default, else whatever the agent is configured with. An
+ *  empty request is the panel's "Default" — the agent's own configuration,
+ *  never a name guessed from a list. */
+function chooseModel(agent: AgentDef, requested: string): string {
+  if (requested === '') return ''
+  const models = modelsOf(agent)
+  if (models.length) {
+    if (models.some((m) => m.key === requested)) return requested
+    return models.find((m) => m.isDefault)?.key ?? models[0]!.key
+  }
+  return modelOf(agent.key, requested).key
+}
+
+/** An agent's models: Orca's catalog when it has them, hermes' own cache for
+ *  hermes, the zcode runtime's bundle for zcode, else the static list. */
+function modelsOf(agent: AgentDef): { key: string; label: string; isDefault: boolean }[] {
+  const catalog = catalogFor(modelsCatalog, agent.key as 'codex' | 'opencode' | 'omp')
+  if (catalog) return catalog
+  if (agent.key === 'hermes') return hermesModelsList()
+  if (agent.key === 'zcode') return zcodeModelsList()
+  return agent.models.map((m, i) => ({ key: m.key, label: m.name, isDefault: m.key === agent.defaultModel && i === 0 }))
+}
+
+/** Hermes' model catalog (its picker's cache) with the person's configured
+ *  default marked; read once, kept for the worker's life. */
+let hermesChecked: { key: string; label: string; isDefault: boolean }[] | null = null
+function hermesModelsList(): { key: string; label: string; isDefault: boolean }[] {
+  if (hermesChecked) return hermesChecked
+  const home = join(homedir(), '.hermes')
+  const read = (rel: string): string | null => {
+    try { return readFileSync(join(home, rel), 'utf8') } catch { return null }
+  }
+  let cache: unknown = null
+  try { cache = JSON.parse(read('cache/model_catalog.json') ?? 'null') } catch { cache = null }
+  hermesChecked = cache ? hermesModels(cache, hermesDefault(read('config.yaml'))) : []
+  return hermesChecked
+}
+
+/** ZCode's models, read off the runtime's server bundle; read once. */
+let zcodeChecked: { key: string; label: string; isDefault: boolean }[] | null = null
+function zcodeModelsList(): { key: string; label: string; isDefault: boolean }[] {
+  if (zcodeChecked) return zcodeChecked
+  try {
+    zcodeChecked = zcodeModels(readFileSync(join(homedir(), '.zcode', 'runtime', 'current', 'server', 'entry-http.js'), 'utf8'))
+  } catch {
+    zcodeChecked = []
+  }
+  return zcodeChecked
+}
+
+async function settings(orca: OrcaWorkerApi): Promise<{ agent: string; model: string; language: string; preferences: string }> {
   const all = await orca.settings.get().catch(() => ({}) as Record<string, unknown>)
+  const agent = agentOf(typeof all.agent === 'string' ? all.agent : DEFAULT_AGENT)
   return {
-    model: typeof all.model === 'string' ? modelOf(all.model).key : DEFAULT_MODEL,
+    agent: agent.key,
+    // A model remembered for another agent never reaches that agent's CLI.
+    model: modelOf(agent.key, typeof all.model === 'string' ? all.model : agent.defaultModel).key,
     language: typeof all.language === 'string' ? all.language : DEFAULT_LANGUAGE,
     preferences: typeof all.preferences === 'string' ? all.preferences : '',
   }
@@ -41,6 +108,10 @@ async function repoOf(top: string) {
   if (!repo) throw invalid(`"${top}" is not inside a git repository.`)
   return repo
 }
+
+/** The agents list, with a quiet shape before any check has run. */
+const agentsOf = (checked: { key: string; name: string; available: boolean; models: { key: string; label: string; isDefault: boolean }[] }[]): { key: string; name: string; available: boolean; models: { key: string; label: string; isDefault: boolean }[] }[] =>
+  checked.length ? checked : AGENTS.slice(0, 1).map((a) => ({ key: a.key, name: a.name, available: false, models: modelsOf(a) }))
 
 /** The task a source carries with it, in auto mode: the PR's description, the commit's message, or the prompts sent to agents while the change was made. */
 async function taskFor(top: string, source: Source): Promise<Task | null> {
@@ -56,6 +127,13 @@ async function taskFor(top: string, source: Source): Promise<Task | null> {
       const { since, label } = await taskSince(store.exec, top, source)
       const prompts = await store.transcriptMessages(top, since)
       return resolveTask({ mode: 'auto', source, prompts, since: label })
+    }
+    case 'turn': {
+      // What was asked of this turn: the prompts sent while the agent answered it.
+      const meta = await store.lookupTurn(top, source.id)
+      if (!meta) return null
+      const prompts = await store.transcriptMessages(top, meta.startedAt - TURN_SLACK, meta.endedAt ?? 0)
+      return resolveTask({ mode: 'auto', source, prompts })
     }
     default:
       return null
@@ -83,7 +161,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('walkthrough.state', async (input): Promise<StateAnswer> => {
     const pick = input?.pick || ''
     const context = await orca.host.call('workspace.readContext').catch(() => null)
-    if (!context) return { workspace: null, repo: null, claude: null, error: null, choices: [] }
+    if (!context) return { workspace: null, repo: null, agents: agentsOf([]), error: null, choices: [] }
     const { workspaces } = await orca.host.call('workspace.list')
     // Name and branch first, then the name alone, then a unique branch match (a
     // folder whose display name differs from its folder name still reads).
@@ -96,29 +174,56 @@ export default function activate(orca: OrcaWorkerApi): void {
     const choices = workspaces.map((w) => ({ path: w.path, name: w.name, branch: w.branch ?? null }))
     if (!match) {
       return {
-        workspace: null, repo: null, claude: null, choices,
+        workspace: null, repo: null, agents: agentsOf([]), choices,
         error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below.`,
       }
     }
-    if (claudeChecked === undefined) claudeChecked = await store.claudeVersion()
+    if (agentsChecked === undefined) {
+      // Which agents Orca has enabled, and what each offers: its own profile
+      // state and model catalog say — the same lists its pickers are built of.
+      // Only the ones whose CLI actually runs are offered; an agent Orca
+      // merely knows about would only be noise with "(not found)" on it.
+      const configDir = process.env.ORCA_CONFIG_DIR ?? join(homedir(), '.config', 'orca')
+      modelsCatalog = readCatalog(catalogPath(configDir))
+      const orcaKeys = await enabledAgents(configDir, modelsCatalog?.keys ?? []).catch(() => [] as string[])
+      const checked = await Promise.all(agentsEnabled(orcaKeys).map(async (a) => ({
+        key: a.key, name: a.name,
+        available: (await agentVersion(store.exec, a.command).catch(() => null)) !== null,
+        models: modelsOf(a),
+      })))
+      const usable = checked.filter((a) => a.available)
+      agentsChecked = usable.length ? usable : checked
+    }
     const repo = await store.repository(match.path)
     return {
       workspace: { path: match.path, name: context.displayName, branch: context.branch || null },
-      repo, claude: claudeChecked, error: null, choices,
+      repo, agents: agentsOf(agentsChecked), error: null, choices,
     }
   })
 
   orca.panels.handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {
     const current = await currentHead(store.exec, top).catch(() => '')
-    const [def, choices, commits] = await Promise.all([
+    const [def, choices, commits, metas] = await Promise.all([
       defaultBase(store.exec, top, current || null),
       baseChoices(store.exec, top, current || null),
       recentCommits(store.exec, top, 30),
+      store.recentTurns(top),
     ])
     let pulls: Awaited<ReturnType<typeof pullRequests>> = []
     let prError: string | null = null
     try { pulls = await pullRequests(store.exec, top, current || null) } catch (e) { prError = e instanceof Error ? e.message : String(e) }
-    return { current, defaultBase: def, bases: choices, commits, pulls, prError }
+    // Each turn's own prompt for its label, in one transcript read for all of them.
+    let sent: Awaited<ReturnType<typeof store.transcriptMessages>> = []
+    if (metas.length) sent = await store.transcriptMessages(top, metas[metas.length - 1]!.startedAt - TURN_SLACK).catch(() => [])
+    const turns: TurnSummary[] = metas.map((m) => {
+      const mine = sent.filter((p) => p.at >= m.startedAt - TURN_SLACK && (!m.endedAt || p.at <= m.endedAt))
+      return {
+        id: m.id, startedAt: m.startedAt, endedAt: m.endedAt, outcome: m.outcome, complete: m.complete, agent: m.agent,
+        prompt: (mine[0]?.text ?? '').split('\n')[0]?.slice(0, 70) ?? '',
+        before: m.beforeTree, after: m.afterTree,
+      }
+    })
+    return { current, defaultBase: def, bases: choices, commits, pulls, prError, turns }
   })
 
   orca.panels.handle('walkthrough.diff', async ({ top, source }): Promise<DiffAnswer> => {
@@ -126,24 +231,26 @@ export default function activate(orca: OrcaWorkerApi): void {
     return diffAnswer(await store.readDiff(repo, source))
   })
 
-  orca.panels.handle('walkthrough.view', async ({ top, source, model, language }): Promise<ViewAnswer> => {
+  orca.panels.handle('walkthrough.view', async ({ top, source, agent, model, language }): Promise<ViewAnswer> => {
     const repo = await repoOf(top)
-    const { model: defModel, language: defLanguage, preferences } = await settings(orca)
-    const chosenModel = modelOf(model ?? defModel).key
+    const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
+    const chosenAgent = agentOf(agent ?? defAgent)
+    const chosenModel = chooseModel(chosenAgent, model ?? defModel)
     const chosenLanguage = language ?? defLanguage
     const diff = await store.readDiff(repo, source)
     const taskNow = await taskFor(repo.top, source)
-    const key = store.keyFor(repo, diff, chosenModel, chosenLanguage, preferences, taskNow)
+    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, taskNow)
     const shown = await store.findShown(repo, diff, key)
 
     const job = await store.jobOf(repo, diff.sk)
     const running = job && !job.done ? await store.alive(job) : false
+    const jobOut = job ? { running, startedAt: job.meta.startedAt, deadline: job.meta.deadline, agent: job.meta.agent ?? 'claude', model: job.meta.model } : null
 
     if (!shown) {
       return {
         diff: diffAnswer(diff), key, shown: null, parts: [], uncovered: [], outdated: 0,
         task: null, taskNow, asks: null,
-        job: job ? { running, startedAt: job.meta.startedAt, deadline: job.meta.deadline, model: job.meta.model } : null,
+        job: jobOut,
       }
     }
 
@@ -171,14 +278,14 @@ export default function activate(orca: OrcaWorkerApi): void {
       list: asksView.asks.map<AskOut>((a) => ({ id: a.id, text: a.text, coverage: a.coverage, steps: a.steps.map((s) => s.position), tail: a.tail, missing: a.missing, outdated: a.outdated })),
       met: asksView.met, total: asksView.total, outside: asksView.outside.map((s) => s.position),
     } : null
-    const meta: EntryMeta = { key: entry.key, model: entry.model, language: entry.language, generatedAt: entry.generatedAt, took: entry.took, cost: entry.cost }
+    const meta: EntryMeta = { key: entry.key, agent: entry.agent ?? 'claude', model: entry.model, language: entry.language, generatedAt: entry.generatedAt, took: entry.took, cost: entry.cost }
     return {
       diff: diffAnswer(diff), key,
       shown: { meta, title: entry.walkthrough.title, summary: entry.walkthrough.summary, exact },
       parts, uncovered, outdated: view.outdated,
       task: entry.task ? { ...entry.task, changed: taskKey(entry.task) !== taskKey(taskNow) } : null,
       taskNow, asks,
-      job: job ? { running, startedAt: job.meta.startedAt, deadline: job.meta.deadline, model: job.meta.model } : null,
+      job: jobOut,
     }
   })
 
@@ -196,10 +303,11 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('walkthrough.task', async ({ top, source }) => ({ task: await taskFor(top, source) }))
 
-  orca.panels.handle('walkthrough.generate', async ({ top, source, model, language, taskMode, taskText }): Promise<GenerateAnswer> => {
+  orca.panels.handle('walkthrough.generate', async ({ top, source, agent, model, language, taskMode, taskText }): Promise<GenerateAnswer> => {
     const repo = await repoOf(top)
-    const { model: defModel, language: defLanguage, preferences } = await settings(orca)
-    const chosenModel = modelOf(model ?? defModel).key
+    const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
+    const chosenAgent = agentOf(agent ?? defAgent)
+    const chosenModel = chooseModel(chosenAgent, model ?? defModel)
     const chosenLanguage = language ?? defLanguage
     const diff = await store.readDiff(repo, source)
     const mode: TaskMode = TASK_MODES.some((m) => m.key === taskMode) ? (taskMode as TaskMode) : 'auto'
@@ -213,12 +321,12 @@ export default function activate(orca: OrcaWorkerApi): void {
       previous: (await store.previousEntry(repo, diff))?.walkthrough ?? null,
       preferences, task,
     })
-    const key = store.keyFor(repo, diff, chosenModel, chosenLanguage, preferences, task)
+    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, task)
     if (!store.fits(prompt)) return { cached: false, key, tooBig: true, promptChars: store.promptChars(prompt) }
     if (await store.hasEntry(key)) return { cached: true, key }
     const previous = await store.previousEntry(repo, diff)
     const before = previous ? previous.walkthrough.parts.flatMap((p) => p.steps.flatMap((s) => s.hunkIds)) : []
-    await store.startJob(repo, diff, { key, model: chosenModel, language: chosenLanguage, prompt, source, task, before })
+    await store.startJob(repo, diff, { key, agent: chosenAgent.key, model: chosenModel, language: chosenLanguage, prompt, source, task, before })
     orca.panels.post('walkthrough.job', { top, sk: diff.sk, done: false })
     return { cached: false, key, promptChars: store.promptChars(prompt) }
   })
@@ -251,19 +359,111 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('walkthrough.markdown', async ({ top, source }) => {
     const repo = await repoOf(top)
-    const { model, language } = await settings(orca)
+    const { agent, model, language } = await settings(orca)
     const diff = await store.readDiff(repo, source)
     const taskNow = await taskFor(repo.top, source)
-    const key = store.keyFor(repo, diff, model, language, '', taskNow)
+    const key = store.keyFor(repo, diff, agent, model, language, '', taskNow)
     const shown = await store.findShown(repo, diff, key)
     if (!shown) throw invalid('No walkthrough to copy for this change. Generate one first.')
     const view = overlay(shown.entry.walkthrough, diff.files)
     const asks = overlayAsks(shown.entry.walkthrough.asks, view)
-    return { text: toMarkdown(view, shown.entry.walkthrough, { what: diff.what, model: shown.entry.model, language: shown.entry.language, cost: shown.entry.cost }, asks, shown.entry.task?.label ?? '') }
+    return { text: toMarkdown(view, shown.entry.walkthrough, { what: diff.what, agent: shown.entry.agent ?? 'claude', model: shown.entry.model, language: shown.entry.language, cost: shown.entry.cost }, asks, shown.entry.task?.label ?? '') }
   })
 
   orca.panels.handle('walkthrough.clipboard', async ({ text }) => {
     await store.copyText(text)
     return { copied: true }
   })
+
+  // ── turns: what each agent changes while answering one prompt ────────────
+  //
+  // The host says when an agent starts and stops working; at each boundary the
+  // working tree is snapshotted into this data folder (engine/turns.ts). The
+  // status bar item is what keeps this worker running from Orca's boot —
+  // without it, a turn could be missed before the first panel opens — and it
+  // says so: visible while a turn is being recorded, gone otherwise.
+
+  const states: TurnStates = {}
+  const open = new Map<string, { id: string; repo: Repo }>()
+  const busy = new Map<string, Promise<unknown>>()
+  // One snapshot at a time per agent: rapid status flips must not interleave
+  // git runs over one turn's private index.
+  const places = new Map<string, { path: string; repo: Repo | null; checked: boolean }>()
+
+  const status = (recording: boolean, tooltip: string): void => {
+    void orca.host.call('statusBar.update', {
+      id: 'turn', visible: recording, text: recording ? '● turn' : '', tone: 'accent', tooltip,
+    }).catch(() => undefined)
+  }
+
+  /** The git repository an agent's workspace points at, remembered per workspace. */
+  async function repoOfPlace(workspaceId: string | null): Promise<Repo | null> {
+    if (!workspaceId) return null
+    let place = places.get(workspaceId)
+    if (!place) {
+      const { workspaces } = await orca.host.call('workspace.list').catch(() => ({ workspaces: [] }))
+      const w = workspaces.find((x) => x.id === workspaceId)
+      if (!w) return null
+      place = { path: w.path, repo: null, checked: false }
+      places.set(workspaceId, place)
+    }
+    if (!place.checked) {
+      place.repo = await store.repository(place.path)
+      place.checked = true
+    }
+    return place.repo
+  }
+
+  async function onStatus(event: PluginEvents['agent.status.changed']): Promise<void> {
+    const said: TurnEvent = {
+      workspaceId: event.workspaceId, paneKey: event.paneKey, terminalId: event.terminalId, title: event.title,
+      state: event.state, at: event.mainAgent?.stateStartedAt || event.receivedAt, outcome: event.mainAgent?.outcome ?? null,
+    }
+    const action = stepTurn(states, said)
+    states[turnKey(said)] = event.state
+    if (action.kind === 'none') return
+    const repo = await repoOfPlace(event.workspaceId)
+    if (!repo) return
+    const previous = busy.get(action.key) ?? Promise.resolve()
+    const mine = previous.then(async () => {
+      if (action.kind === 'open') {
+        const id = turnId(action.startedAt, action.key)
+        // A turn a worker restart left open ends where its next prompt begins —
+        // never snapshotted then, so the person's edits after the interruption
+        // are not claimed as the agent's.
+        const orphan = (await store.recentTurns(repo.top)).find((m) => !m.endedAt && m.workspaceId === event.workspaceId && m.terminalId === (event.terminalId ?? null))
+        if (orphan) await store.closeTurn(repo, orphan.id, action.startedAt, null, false)
+        await store.openTurn(repo, { id, startedAt: action.startedAt, terminalId: event.terminalId ?? null, workspaceId: event.workspaceId, agent: action.agent })
+        open.set(action.key, { id, repo })
+        status(true, `${repo.name}${action.agent ? ` · ${action.agent}` : ''}`)
+      } else if (action.kind === 'close') {
+        const running = open.get(action.key)
+        if (!running) return
+        open.delete(action.key)
+        await store.closeTurn(running.repo, running.id, action.endedAt, action.outcome)
+        if (open.size === 0) status(false, '')
+      }
+    }).catch(() => undefined)
+    busy.set(action.key, mine)
+  }
+
+  orca.events.on('agent.status.changed', (event) => { void onStatus(event) })
+
+  // Agents already at work when this worker starts are seeded, so the turn
+  // under way is never opened half-way; their next prompt starts a whole one.
+  void (async () => {
+    try {
+      const context = await orca.host.call('workspace.readContext')
+      if (!context) return
+      const { workspaces } = await orca.host.call('workspace.list')
+      const match = matchFocused({ branch: context.branch, displayName: context.displayName }, workspaces)
+        ?? workspaces.find((w) => (w.branch ?? '').replace(/^refs\/heads\//, '') === context.branch)
+      if (!match) return
+      const { agents } = await orca.host.call('agents.list')
+      for (const a of agents) {
+        if (!a.terminalId) continue
+        states[`${match.id}\u0000${a.terminalId}`] = a.state
+      }
+    } catch { /* nothing focused yet; the events will teach the states */ }
+  })()
 }

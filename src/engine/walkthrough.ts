@@ -41,7 +41,7 @@ export type Walkthrough = {
 export type StepView = Step & {
   part: number
   position: number
-  found: { hunk: { id: string; header: string; added: number; deleted: number; oldStart: number; newStart: number }; file: DigestFile }[]
+  found: { hunk: { id: string; header: string; added: number; deleted: number; oldStart: number; newStart: number; newLines: number }; file: DigestFile }[]
   missing: number
   outdated: boolean
 }
@@ -298,7 +298,7 @@ export function overlay(walkthrough: Walkthrough, files: DigestFile[]): Overlay 
         const hit = index.get(id)
         if (hit) {
           found.push({
-            hunk: { id: hit.hunk.id, header: hit.hunk.header, added: hit.hunk.added, deleted: hit.hunk.deleted, oldStart: hit.hunk.oldStart, newStart: hit.hunk.newStart },
+            hunk: { id: hit.hunk.id, header: hit.hunk.header, added: hit.hunk.added, deleted: hit.hunk.deleted, oldStart: hit.hunk.oldStart, newStart: hit.hunk.newStart, newLines: hit.hunk.newLines },
             file: hit.file,
           })
           covered.add(id)
@@ -323,14 +323,27 @@ export function overlay(walkthrough: Walkthrough, files: DigestFile[]): Overlay 
   return { parts, steps, uncovered, outdated: steps.filter((s) => s.outdated).length }
 }
 
-/** Lines added and removed per file across a set of hunks, in order of appearance. */
-export function fileTotals(found: StepView['found']): { path: string; added: number; deleted: number }[] {
-  const by = new Map<string, { path: string; added: number; deleted: number }>()
+/**
+ * Lines added and removed per file across a set of hunks, in order of
+ * appearance, with the line ranges each hunk covers (`[start, end]` in the new
+ * file, joined where they touch) — the excerpts a step summarizes.
+ */
+export function fileTotals(found: StepView['found']): { path: string; added: number; deleted: number; ranges: [number, number][] }[] {
+  const by = new Map<string, { path: string; added: number; deleted: number; spans: [number, number][] }>()
   for (const { hunk, file } of found) {
-    const t = by.get(file.path) ?? { path: file.path, added: 0, deleted: 0 }
+    const t = by.get(file.path) ?? { path: file.path, added: 0, deleted: 0, spans: [] as [number, number][] }
     t.added += hunk.added
     t.deleted += hunk.deleted
+    if (hunk.newLines > 0) t.spans.push([hunk.newStart, hunk.newStart + hunk.newLines - 1])
     by.set(file.path, t)
   }
-  return [...by.values()]
+  return [...by.values()].map(({ path, added, deleted, spans }) => {
+    const ranges: [number, number][] = []
+    for (const [start, end] of spans.sort((a, b) => a[0] - b[0])) {
+      const last = ranges[ranges.length - 1]
+      if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end)
+      else ranges.push([start, end])
+    }
+    return { path, added, deleted, ranges }
+  })
 }

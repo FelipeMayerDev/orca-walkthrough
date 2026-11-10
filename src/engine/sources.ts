@@ -7,8 +7,13 @@
 // unstaged one.
 
 import type { Exec } from './exec'
+import { turnEnv, turnPaths } from './turns'
+import { MAX_TASK_CHARS } from './task'
 
 // Reads write nothing under .git: no index refresh, no lock, no fsmonitor.
+// (A turn's snapshots are the one deliberate exception, and they write only
+// into the plugin's own data folder — see turns.ts; the repository itself,
+// its index, refs and objects included, is never touched.)
 const READ = ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.quotePath=false', '-c', 'diff.autoRefreshIndex=false']
 // The user's diff settings (no prefixes, external tools, color) must not change what is parsed.
 const DIFF = ['--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', '-M']
@@ -24,6 +29,7 @@ export type Source =
   | { kind: 'branch'; base: string; head?: string }
   | { kind: 'commit'; hash: string; subject?: string }
   | { kind: 'pr'; number: number; title?: string; head?: string; base?: string }
+  | { kind: 'turn'; id: string; before?: string; after?: string; label?: string }
 
 export const SCOPES: { key: Source['kind']; label: string; about: string }[] = [
   { key: 'uncommitted', label: 'Uncommitted', about: 'Everything not committed yet: staged, unstaged and new files' },
@@ -32,17 +38,18 @@ export const SCOPES: { key: Source['kind']; label: string; about: string }[] = [
   { key: 'branch', label: 'Branch', about: 'Everything this branch adds to its base, committed or not' },
   { key: 'commit', label: 'Commit', about: 'One commit, against its first parent' },
   { key: 'pr', label: 'Pull request', about: 'An open pull request on GitHub, as GitHub shows its changes (needs gh)' },
+  { key: 'turn', label: 'Last turn', about: 'Only what an agent changed while answering one prompt: not your edits before it, not the ones after' },
 ]
 
 export type GitResult = { ok: boolean; code: number; out: string; err: string }
 
-export async function git(exec: Exec, cwd: string, args: string[]): Promise<GitResult> {
-  const r = await exec('git', [...READ, ...args], { cwd })
+export async function git(exec: Exec, cwd: string, args: string[], env?: Record<string, string>): Promise<GitResult> {
+  const r = await exec('git', [...READ, ...args], { cwd, env })
   return { ok: r.code === 0, code: r.code, out: r.stdout ?? '', err: (r.stderr || '').trim() }
 }
 
-async function must(exec: Exec, cwd: string, args: string[]): Promise<string> {
-  const r = await git(exec, cwd, args)
+async function must(exec: Exec, cwd: string, args: string[], env?: Record<string, string>): Promise<string> {
+  const r = await git(exec, cwd, args, env)
   if (!r.ok) throw new Error(r.err || `git ${args[0]} failed`)
   return r.out
 }
@@ -76,6 +83,7 @@ export function sourceKey(source: Source): string {
   if (source.kind === 'commit') return `commit:${source.hash}`
   // Not pinned to the head commit: when the pull request moves on, its last walkthrough is shown as outdated.
   if (source.kind === 'pr') return `pr:${source.number}`
+  if (source.kind === 'turn') return `turn:${source.id}`
   return source.kind
 }
 
@@ -88,6 +96,7 @@ export function describe(source: Source, repo: Repo | null = null): string {
     case 'branch': return `Everything branch "${source.head ?? repo?.branch ?? 'HEAD'}" adds to "${source.base}", committed or not. Work that came in from ${source.base} is left out.`
     case 'commit': return `Commit ${source.hash.slice(0, 12)}${source.subject ? ` ("${source.subject}")` : ''}, against its first parent.`
     case 'pr': return `Pull request #${source.number}${source.title ? ` ("${source.title}")` : ''}${source.head && source.base ? `, "${source.head}" into "${source.base}"` : ''}, as GitHub shows its changes.`
+    case 'turn': return `What an agent changed while answering one prompt${source.label ? ` ("${source.label}")` : ''}: not the person's edits before it, not the ones after.`
     default: return 'Local changes.'
   }
 }
@@ -139,6 +148,20 @@ export async function untracked(exec: Exec, top: string): Promise<{ patches: str
 type Stamp = { path: string; i: number; stamp: string; size: number }
 
 /**
+ * The untracked paths bigger than `limit` bytes: the ones a turn's snapshot
+ * leaves out (the same bound the walkthrough reads new files under), so one
+ * stray huge log cannot be copied into the turn's objects.
+ */
+export async function bigUntracked(exec: Exec, top: string, limit = MAX_UNTRACKED_BYTES): Promise<string[]> {
+  const list = await git(exec, top, ['ls-files', '--others', '--exclude-standard', '-z'])
+  if (!list.ok) return []
+  const paths = list.out.split('\0').filter(Boolean)
+  if (!paths.length) return []
+  const stats = await stamps(exec, top, paths)
+  return stats.filter((s) => s.size > limit).map((s) => s.path)
+}
+
+/**
  * Each file's size and modification time, in one call: a stray 40 MB log must
  * not reach the model. Exactly one line per file, in order ("-1" when it can't
  * be read), so no size lands on the wrong path. GNU stat first: BSD's `stat
@@ -154,9 +177,11 @@ async function stamps(exec: Exec, top: string, paths: string[]): Promise<Stamp[]
 }
 
 /**
- * A source → sections to parse, and files that could not be read.
+ * A source → sections to parse, and files that could not be read. `dataRoot`
+ * is the plugin's data folder, needed only by a turn (its snapshots live
+ * there); other sources read nothing outside the repository.
  */
-export async function loadSections(exec: Exec, top: string, source: Source): Promise<{ sections: { scope: string; patch: string }[]; unread: { path: string; why: string }[] }> {
+export async function loadSections(exec: Exec, top: string, source: Source, ctx: { dataRoot?: string } = {}): Promise<{ sections: { scope: string; patch: string }[]; unread: { path: string; why: string }[] }> {
   const sections: { scope: string; patch: string }[] = []
   let unread: { path: string; why: string }[] = []
   const add = (scope: string, ...patches: (string | null)[]) => {
@@ -194,6 +219,22 @@ export async function loadSections(exec: Exec, top: string, source: Source): Pro
     case 'pr':
       add('pr', await gh(exec, top, ['pr', 'diff', String(source.number), '--color=never']))
       break
+    case 'turn': {
+      // The diff of the two trees the worker snapshotted at the turn's start
+      // and end. A turn without both (the plugin loaded mid-turn, or it never
+      // ended) has nothing to claim, so it reads as an empty diff — and so does
+      // a turn whose snapshots were evicted: nothing is left to claim there either.
+      if (source.before && source.after && ctx.dataRoot) {
+        try {
+          const gitDir = (await must(exec, top, ['rev-parse', '--absolute-git-dir'])).trim()
+          const turn = turnPaths(ctx.dataRoot, top, source.id)
+          // Reads the trees from the turn's private objects with the repository's
+          // as alternates (see turns.turnEnv): still a read, into .git too.
+          add('turn', await must(exec, top, ['diff', ...DIFF, source.before, source.after], turnEnv(gitDir, turn.dir)))
+        } catch { /* the snapshots are gone or unreadable; an empty diff says so */ }
+      }
+      break
+    }
     default:
       throw new Error(`Unknown source "${(source as Source).kind}"`)
   }
@@ -224,14 +265,16 @@ export type PullRequest = { number: number; title: string; body: string; head: s
 
 /**
  * The repository's open pull requests, newest update first. The description comes
- * with the list, so matching a pull request against it costs no other call.
+ * with the list, so matching a pull request against it costs no other call —
+ * clipped to the task budget (`MAX_TASK_CHARS`): everything past it never
+ * reaches the model, and fifty full templates would not fit the answer home.
  */
 export async function pullRequests(exec: Exec, top: string, branch: string | null = null): Promise<PullRequest[]> {
   const out = await gh(exec, top, ['pr', 'list', '--state', 'open', '--limit', '50', '--json', 'number,title,body,headRefName,baseRefName,author,isDraft,updatedAt'])
   let list: any[]
   try { list = JSON.parse(out || '[]') } catch { throw new Error('gh answered with something other than a list of pull requests.') }
   return list
-    .map((p) => ({ number: p.number, title: p.title ?? '', body: typeof p.body === 'string' ? p.body : '', head: p.headRefName ?? '', base: p.baseRefName ?? '', author: p.author?.login ?? '',
+    .map((p) => ({ number: p.number, title: p.title ?? '', body: typeof p.body === 'string' ? p.body.slice(0, MAX_TASK_CHARS) : '', head: p.headRefName ?? '', base: p.baseRefName ?? '', author: p.author?.login ?? '',
       draft: Boolean(p.isDraft), updated: p.updatedAt ?? '', current: Boolean(branch) && p.headRefName === branch }))
     .sort((a, b) => b.updated.localeCompare(a.updated))
 }

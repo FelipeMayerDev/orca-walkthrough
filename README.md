@@ -7,25 +7,30 @@ steps, orders them so each builds on the last, and explains each one with its co
 alongside. It explains; it does not judge.
 
 Open the **Walkthrough** panel in Orca's right sidebar, pick what to read —
-uncommitted work, the staged part, the branch, one commit, or a pull request — and
-press **Generate**. Navigate with `j`/`k`, mark steps read with `x`, see what no step
-covers at the end.
+uncommitted work, the staged part, the branch, one commit, a pull request, or the
+last turn of an agent — and press **Generate**. The walkthrough reads as one
+document: every part with its steps in order, the code beside the words, what no
+step covers at the end. Walk it with `j`/`k`, mark steps read with `x`, show
+only the unread with `u`.
 
 ## What it does
 
 - **Readable structure** — related edits across files become one step; types and entry
   points come before the code that uses them; tests sit with the code they prove.
   Steps are grouped into parts; **Key change** flags the critical ones, **Context** the
-  skimmable ones.
+  skimmable ones. Each step carries a chip per file it touches (`path +N −M`,
+  clickable to that file's code) and every excerpt is labelled with the lines it
+  covers (`lines 42–58`, the function it sits in, its own counts); the same ranges
+  travel with **Copy** (`path +N −M L42–58`).
 - **Notes, only where they earn their place** — a note states something the reader
   signs up for by accepting the change, and nothing more: Decisions, Upkeep,
   Limitations, Divergences, Untested aspects. Most steps have none.
 - **Coverage honesty** — edits no step explains are listed under **Not covered**;
   lockfiles and generated files are listed but not analyzed.
-- **Task matching** — the diff is matched against what was asked: the prompts sent to
-  Claude Code agents while the change was made (read from local transcripts), a pull
-  request's description, a commit's message, or your own words. Each request is marked
-  ✓ carried out, ◐ partly, ○ not in this diff.
+- **Task matching** — the diff is matched against what was asked: the prompt a turn
+  answered, the prompts sent to Claude Code agents while the change was made (read
+  from local transcripts), a pull request's description, a commit's message, or your
+  own words. Each request is marked ✓ carried out, ◐ partly, ○ not in this diff.
 - **Staleness** — steps are tied to exact code; when an agent keeps editing, steps mark
   themselves **outdated**. Read marks (`x`) persist across sessions, per repository.
 - **Sharing** — **Copy** puts the whole walkthrough on the clipboard as Markdown,
@@ -35,16 +40,22 @@ covers at the end.
 ## Scopes
 
 Uncommitted, Staged, Unstaged, Branch (everything this branch adds to its base,
-committed or not), one Commit, or a Pull request (through the GitHub CLI, `gh`).
+committed or not), one Commit, a Pull request (through the GitHub CLI, `gh`), or
+**Last turn**: only what an agent changed while answering one prompt — not your
+edits before it, not the ones after. Recent turns are listed under **Turns**, the
+newest first.
 
 ## How it works
 
-One generation is one `claude -p` run with no tools, no MCP servers and no session
-persistence — the model reads a digest of the diff (every reviewable hunk in full,
-under short aliases `h1, h2, …`) and answers with a single JSON object that is
+One generation is one run of an agent's CLI — **whichever agents Orca has enabled**
+(the panel reads Orca's own list, and each agent's model list from Orca's catalog,
+the same one its pickers are built of). The run has no tools, no MCP servers and no
+session persistence — the model reads a digest of the diff (every reviewable hunk in
+full, under short aliases `h1, h2, …`) and answers with a single JSON object that is
 normalized against the digest: an alias that isn't there is dropped, never drawn as a
 step pointing at nothing. Lockfiles and generated files are kept out of what the model
-reads but never out of what you see.
+reads but never out of what you see. Task matching reads Claude Code's transcripts,
+so a walkthrough made by another agent explains without matching.
 
 - Results are cached by everything that decides them (the code, model, language,
   preferences, task) — putting the working tree back the way it was brings the earlier
@@ -56,13 +67,34 @@ reads but never out of what you see.
 - Nothing is sent to the model until you press Generate.
 
 Data lives under `~/.local/share/orca/walkthrough/` (entries, pointers, jobs, read
-marks).
+marks, turns).
+
+## Turns
+
+While the plugin is enabled, its worker listens to Orca's `agent.status.changed`:
+when an agent starts answering, the working tree is snapshotted; when it stops
+(whatever the outcome — a cancelled turn still changed the tree), again. The diff
+of the two trees is the turn. The snapshots are written with a private index and
+object directory inside the plugin's own data folder, so the repository's `.git`
+is never written — not even a modification time. New files over 1 MB stay out,
+like in the walkthrough itself. Twenty turns are kept per repository.
+
+Turns are recorded only while Orca runs — the small status bar item (● turn)
+marks when one is being recorded, and keeps the worker alive from Orca's boot so
+no turn before the first panel open is missed. An agent already working when the
+plugin loads starts a whole turn at its next prompt. What the person asked in a
+turn (read from Claude Code's transcripts) becomes the walkthrough's task; for
+agents without transcripts the walkthrough simply explains without matching.
 
 ## Settings
 
-In Orca's Settings → Plugins → Walkthrough:
+In Orca's Settings → Plugins → Walkthrough (or behind the ⚙ in the panel):
 
-- **Model** — Haiku (default, fast and cheap), Sonnet or Opus.
+- **Agent** — which of Orca's enabled agents reads the diff: the ones whose CLIs
+  are installed (Claude, ZCode, Codex, OpenCode, Oh My Pi, Hermes…), each with
+  its own model list — Orca's catalog, the account's default first.
+- **Model** — Claude's default when no agent is chosen: Haiku (fast and cheap),
+  Sonnet or Opus.
 - **Language** — the language the walkthrough is written in (prose only; code
   identifiers stay as they are).
 - **Preferences** — your own wishes for every walkthrough, added to every prompt.

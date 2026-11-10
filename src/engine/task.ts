@@ -65,11 +65,11 @@ export const unwrap = (prompt: string): string => /^<hc from="[^"]*">([\s\S]*?)(
 
 /**
  * Claude Code transcript lines → what a person typed into an agent working in
- * `top`, since `since` (ms), oldest first. Subagents' prompts, tool results,
- * meta lines, compaction summaries and commands are left out; a resumed
- * session's copied history is counted once.
+ * `top`, since `since` (ms) until `until` (ms; 0 for no bound), oldest first.
+ * Subagents' prompts, tool results, meta lines, compaction summaries and
+ * commands are left out; a resumed session's copied history is counted once.
  */
-export function parseTranscript(text: string | null | undefined, { top = null as string | null, since = 0 } = {}): Prompt[] {
+export function parseTranscript(text: string | null | undefined, { top = null as string | null, since = 0, until = 0 } = {}): Prompt[] {
   const out: Prompt[] = []
   const seen = new Set<string>()
   for (const line of String(text ?? '').split('\n')) {
@@ -83,6 +83,7 @@ export function parseTranscript(text: string | null | undefined, { top = null as
     if (top && cwd !== top && !cwd.startsWith(`${top}/`)) continue
     const at = Date.parse(j.timestamp ?? '') || 0
     if (at < since) continue
+    if (until && at > until) continue
     const body = unwrap(contentText(j.message?.content).trim()).trim()
     if (isNoise(body)) continue
     const id = j.uuid ?? `${at}\n${body}`
@@ -182,6 +183,13 @@ export function resolveTask({ mode = 'auto', own = '', source = null, pr = null,
       return task('prompts', `${n} prompt${n === 1 ? '' : 's'} sent to agents since ${since}`, `${n} prompt${n === 1 ? '' : 's'}`,
         `the prompts sent to coding agents in this repository while the change was made (since ${since}), oldest first`, joinMessages(list))
     }
+    case 'turn': {
+      const list = (prompts ?? []).filter((p) => !isNoise(p.text))
+      if (!list.length) return null
+      const n = list.length
+      return task('turn', n === 1 ? 'The prompt this turn answered' : `${n} prompts this turn answered`, `${n} prompt${n === 1 ? '' : 's'}`,
+        `the prompt${n === 1 ? '' : 's'} the person sent while the agent answered, oldest first`, joinMessages(list))
+    }
     default:
       return null
   }
@@ -195,9 +203,10 @@ export const taskKey = (task: Task | null): string => (task ? hash(`${task.from}
  * keeps the key it had. Prompts sent to agents grow with every message (a
  * "thanks", the walkthrough's own Send), so a walkthrough matched against them
  * is keyed by that kind of task alone: it stays the walkthrough of this code,
- * matched against the prompts as they were when it was written.
+ * matched against the prompts as they were when it was written. A turn's
+ * prompts are bounded by the turn, but keyed the same way, for the same reason.
  */
-export const taskCacheKey = (task: Task | null): string => (!task ? '' : task.from === 'prompts' ? 'prompts' : taskKey(task))
+export const taskCacheKey = (task: Task | null): string => (!task ? '' : task.from === 'prompts' || task.from === 'turn' ? task.from : taskKey(task))
 
 /** A repository's path as it stands inside Claude Code's JSON, to find its lines with grep -F. */
 export const jsonPath = (path: string): string => JSON.stringify(String(path ?? '')).slice(1, -1)

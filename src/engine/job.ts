@@ -1,44 +1,35 @@
-// One generation is one `claude -p` run in the background, in a folder of its
-// own: the prompt goes in as files, the answer comes out as a file. Nothing
-// ties it to the panel or the worker that asked — the worker may stop while
-// the run goes on — so the next look finds the answer.
+// One generation is one agent run in the background, in a folder of its own:
+// the prompt goes in as files, the answer comes out as a file. Which agent
+// runs is the adapter's word (agents.ts); nothing else here knows one CLI from
+// another. Nothing ties a run to the panel or the worker that asked — the
+// worker may stop while the run goes on — so the next look finds the answer.
 
-import { parseJson } from './walkthrough'
+import { agentOf, AGENTS, type AgentDef } from './agents'
 
-export const MODELS = [
-  { key: 'haiku', name: 'Haiku', about: 'Fast and cheap; fine for most changes' },
-  { key: 'sonnet', name: 'Sonnet', about: 'Better grouping on large or subtle changes' },
-  { key: 'opus', name: 'Opus', about: 'The most careful reading, the highest cost' },
-]
-export const DEFAULT_MODEL = 'haiku'
-export const modelOf = (key: string) => MODELS.find((m) => m.key === key) ?? MODELS[0]!
-
-// No tools, no MCP servers, no settings, hooks or skills: the model reads the
-// prompt and answers. Each of those would otherwise ride along on every call
-// (a full Claude Code setup can be hundreds of thousands of tokens).
-export const CLAUDE_FLAGS = [
-  '-p', '--output-format', 'json', '--tools', '', '--no-session-persistence',
-  '--strict-mcp-config', '--setting-sources', '', '--disable-slash-commands',
-]
+export { AGENTS, DEFAULT_AGENT, agentOf, modelOf } from './agents'
 
 /** Whether a process's command line is a walkthrough run (its pid file may outlive it, and pids are reused). */
-// Matched by the flags the run alone passes together: the program itself can show as claude, a
-// versioned binary or node, depending on how Claude Code was installed.
-export const isRunCommand = (command: string): boolean =>
-  ['--json-schema', '--no-session-persistence', '--strict-mcp-config', '--disable-slash-commands'].every((flag) => String(command).includes(flag))
-
-const shellQuote = (s: string): string => `'${String(s).replace(/'/g, `'\\''`)}'`
+// Matched by flags the run alone passes together: the program itself can show as claude, codex,
+// opencode, a versioned binary or node, depending on how each was installed.
+export const isRunCommand = (command: string): boolean => {
+  const line = String(command)
+  for (const agent of AGENTS) {
+    if (agent.marks.every((flag) => line.includes(flag))) return true
+  }
+  return false
+}
 
 /**
  * The script a job folder runs: `sh run.sh <model> <seconds>`. A watchdog
- * stops claude after <seconds>, so a hung run ends even when no one is
- * watching; it checks every few seconds and leaves with claude.
+ * stops the agent after <seconds>, so a hung run ends even when no one is
+ * watching; it checks every few seconds and leaves with the agent.
  */
-export function jobScript(): string {
+export function jobScript(agentKey: string): string {
+  const agent = agentOf(agentKey)
   return `#!/bin/sh
 # One walkthrough generation. Written by the walkthrough plugin for Orca.
 cd "$(dirname "$0")" || exit 1
-claude ${CLAUDE_FLAGS.map(shellQuote).join(' ')} --model "$1" --json-schema "$(cat schema.json)" --system-prompt "$(cat system.txt)" < prompt.txt > out.json 2> err.txt &
+${agent.line(`$1`)} &
 pid=$!
 echo $pid > pid
 ( waited=0
@@ -55,17 +46,7 @@ echo $? > code.tmp && mv code.tmp code
  * What a finished job left: the walkthrough's raw object and its cost, or an
  * error with a message a person can act on.
  */
-export function readOutcome({ out, err, code }: { out: string | null; err: string | null; code: string | null }): { raw: any; cost: number | null } {
-  let answer: any = null
-  try { answer = out ? JSON.parse(out) : null } catch { answer = null }
-  if (!answer) {
-    const why = String(err ?? '').trim().split('\n').filter(Boolean).slice(-3).join(' ') || `claude exited with ${String(code ?? '?').trim()}`
-    throw Object.assign(new Error(why), { code: 'failed' })
-  }
-  if (answer.is_error || (answer.subtype && answer.subtype !== 'success')) {
-    const why = typeof answer.result === 'string' && answer.result.trim() ? answer.result.trim() : answer.subtype ?? 'claude reported an error'
-    throw Object.assign(new Error(why), { code: /log ?in/i.test(why) ? 'login' : 'failed' })
-  }
-  const raw = answer.structured_output ?? parseJson(answer.result)
-  return { raw, cost: typeof answer.total_cost_usd === 'number' ? answer.total_cost_usd : null }
+export function readOutcome(agentKey: string, { out, err, code }: { out: string | null; err: string | null; code: string | null }): { raw: any; cost: number | null } {
+  const agent: AgentDef = agentOf(agentKey)
+  return agent.read(String(out ?? ''), String(err ?? ''), String(code ?? ''))
 }

@@ -5,8 +5,9 @@ import type {
   AskOut, DiffAnswer, EntryMeta, HunkLines, HunkRef, ScopesAnswer, Source, StateAnswer,
   StepOut, ViewAnswer,
 } from '../src/protocol'
-import { MODELS } from '../src/engine/job'
+import { agentOf, modelOf } from '../src/engine/agents'
 import { LANGUAGES } from '../src/engine/languages'
+import { buildHunkBlocks, el, filesOf, icon, short } from './render'
 
 type TaskMode = 'auto' | 'own' | 'off'
 
@@ -24,21 +25,10 @@ const copyButton = byId<HTMLButtonElement>('copy')
 const repoLabel = byId<HTMLButtonElement>('repo')
 const statusLine = byId<HTMLDivElement>('status')
 const controls = byId<HTMLDivElement>('controls')
+const settingsButton = byId<HTMLButtonElement>('settings')
+const settingsRow = byId<HTMLDivElement>('settings-row')
+const agentSelect = byId<HTMLSelectElement>('agent')
 const hints = byId<HTMLElement>('hints')
-
-/** A tiny element builder: el('div', {class: 'x', onclick: fn}, ...children). */
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, unknown> = {}, ...children: (Node | string | null | undefined)[]): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag)
-  for (const [name, value] of Object.entries(attrs)) {
-    if (value === null || value === undefined) continue
-    if (name === 'class') node.className = String(value)
-    else if (name === 'text') node.textContent = String(value)
-    else if (name.startsWith('on') && typeof value === 'function') node.addEventListener(name.slice(2), value as EventListener)
-    else node.setAttribute(name, String(value))
-  }
-  for (const child of children) node.append(child instanceof Node ? child : String(child))
-  return node
-}
 
 const request = orca.plugin.request.bind(orca.plugin)
 const store = {
@@ -59,6 +49,8 @@ let top: string | null = null
 let repoName: string | null = null
 let scopes: ScopesAnswer | null = null
 let source: Source | null = null
+let agent = store.get('wt.agent', '')
+let agentsList: StateAnswer['agents'] = []
 let model = store.get('wt.model', '')
 let language = store.get('wt.language', '')
 let view: ViewAnswer | null = null
@@ -67,7 +59,6 @@ let page: 'walk' | 'task' = 'walk'
 let unreadOnly = false
 let taskMode = store.get<TaskMode>('wt.taskMode', 'auto')
 let taskText = store.get('wt.taskText', '')
-let stepsOpen = false
 const hunksCache = new Map<string, HunkLines>()
 const uncoveredOpen = new Set<string>()
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -124,6 +115,7 @@ async function boot(): Promise<void> {
   top = state.workspace.path
   repoName = state.repo.name
   lastChoices = state.choices
+  agentsList = state.agents
   repoLabel.hidden = false
   repoLabel.textContent = `${state.workspace.name}${state.workspace.branch ? ` · ${state.workspace.branch}` : ''}`
   repoLabel.onclick = () => pickWorkspace(lastChoices)
@@ -139,6 +131,14 @@ function message(e: unknown): string {
   if (e instanceof Error) return e.message
   const any = e as { message?: string }
   return any?.message ?? String(e)
+}
+
+/** The one icon button that starts, stops and restarts: what it is now. */
+function setAction(kind: 'generate' | 'cancel' | 'regenerate'): void {
+  actionButton.replaceChildren(icon(kind === 'generate' ? 'play' : kind === 'cancel' ? 'stop' : 'refresh', 13))
+  const name = kind === 'generate' ? 'Generate' : kind === 'cancel' ? 'Cancel' : 'Regenerate'
+  actionButton.title = name
+  actionButton.setAttribute('aria-label', name)
 }
 
 /** The focused workspace could not be matched: offer Orca's workspaces, and remember the choice. */
@@ -188,6 +188,17 @@ async function loadScopes(): Promise<void> {
     for (const p of scopes.pulls.slice(0, 10)) option(`#${p.number} ${p.title}`.slice(0, 80), { kind: 'pr', number: p.number, title: p.title, head: p.head, base: p.base }, pulls)
     scopeSelect.append(pulls)
   }
+  if (scopes.turns?.length) {
+    const turns = el('optgroup', { label: 'Turns' })
+    for (const [i, t] of scopes.turns.slice(0, 20).entries()) {
+      const when = new Date(t.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      const what = t.prompt || t.agent || 'agent turn'
+      const mark = t.complete ? '' : ' · unfinished'
+      option(`${i === 0 ? 'Last turn · ' : ''}${when} ${what}${mark}`.slice(0, 90),
+        { kind: 'turn', id: t.id, before: t.before ?? undefined, after: t.after ?? undefined, label: what }, turns)
+    }
+    scopeSelect.append(turns)
+  }
 
   // Restore the last source read here, when it still exists in the list.
   const saved = store.get<Source | null>(`wt.source.${top}`, null)
@@ -205,13 +216,48 @@ async function loadScopes(): Promise<void> {
 
 // ── settings-driven selects ───────────────────────────────────────────────
 
+/** The agent's own model list — Orca's catalog when the worker read it —
+ *  remembering a choice per agent, and taking the account's default. */
+function fillModels(): void {
+  const known = agentsList.find((a) => a.key === agent)?.models
+  const models = known?.length
+    ? known.map((m) => ({ key: m.key, name: m.label, about: m.isDefault ? "This account's default" : undefined }))
+    : agentOf(agent).models
+  const fallback = known?.find((m) => m.isDefault)?.key ?? agentOf(agent).defaultModel
+  const saved = store.get(`wt.model.${agent}`, '')
+  model = models.some((m) => m.key === saved) ? saved : fallback
+  modelSelect.replaceChildren(...models.map((m) => el('option', { text: m.name, value: m.key, title: m.about })))
+  modelSelect.value = model
+}
+
 async function fillSettings(): Promise<void> {
   const settings = await orca.settings.get().catch(() => ({}) as Record<string, unknown>)
-  if (!model) model = typeof settings.model === 'string' ? settings.model : 'haiku'
+  if (!agent) agent = typeof settings.agent === 'string' ? settings.agent : 'claude'
   if (!language) language = typeof settings.language === 'string' ? settings.language : 'en'
-  modelSelect.replaceChildren(...MODELS.map((m) => el('option', { text: m.name, value: m.key, title: m.about })))
-  modelSelect.value = model
-  modelSelect.onchange = () => { model = modelSelect.value; store.put('wt.model', model); void loadView() }
+  // The agents Orca has enabled, as the worker read them; each CLI that is
+  // missing shows up, disabled, rather than vanishing. Before the worker has
+  // answered, claude alone and unmarked — it is this plugin's default.
+  const list = agentsList.length
+    ? agentsList
+    : [{ key: 'claude', name: 'Claude', available: true, models: [] }]
+  agentSelect.replaceChildren(...list.map((a) => {
+    const option = el('option', { text: a.available ? a.name : `${a.name} (not found)`, value: a.key })
+    option.disabled = !a.available
+    return option
+  }))
+  if (list.some((a) => a.key === agent && a.available)) agentSelect.value = agent
+  else {
+    const first = list.find((a) => a.available)
+    if (first) { agent = first.key; agentSelect.value = agent }
+  }
+  agentSelect.onchange = () => {
+    agent = agentSelect.value
+    store.put('wt.agent', agent)
+    fillModels()
+    void loadView()
+  }
+  fillModels()
+  modelSelect.onchange = () => { model = modelSelect.value; store.put(`wt.model.${agent}`, model); void loadView() }
   languageSelect.replaceChildren(...LANGUAGES.map((l) => el('option', { text: l.name, value: l.tag })))
   languageSelect.value = language
   languageSelect.onchange = () => { language = languageSelect.value; store.put('wt.language', language); void loadView() }
@@ -222,7 +268,7 @@ async function fillSettings(): Promise<void> {
 async function loadView(): Promise<void> {
   if (!top || !source) return
   const before = view
-  try { view = await request('walkthrough.view', { top, source, model, language }, { timeoutMs: 60000 }) }
+  try { view = await request('walkthrough.view', { top, source, agent, model, language }, { timeoutMs: 60000 }) }
   catch (e) { fail(`Could not read the change: ${message(e)}`); return }
   hunksCache.clear()
   const stepList = steps()
@@ -245,8 +291,16 @@ function render(): void {
   renderWalk()
 }
 
+/** What wrote it: "Codex · GPT-6.1-Sol", or just the Claude model. */
+const byline = (meta: EntryMeta): string => {
+  const agentName = meta.agent && meta.agent !== 'claude' ? `${agentOf(meta.agent).name} · ` : ''
+  const known = agentsList.find((a) => a.key === (meta.agent ?? 'claude'))?.models.find((m) => m.key === meta.model)?.label
+  const modelName = known ?? modelOf(meta.agent ?? 'claude', meta.model).name
+  return `${agentName}${modelName}`
+}
+
 function metaChips(meta: EntryMeta, exact: boolean): HTMLElement {
-  const modelName = MODELS.find((m) => m.key === meta.model)?.name ?? meta.model
+  const modelName = byline(meta)
   const chips = [el('span', { class: 'chip', title: 'Generated' }, `${modelName} · ${ago(meta.generatedAt)}`)]
   if (typeof meta.cost === 'number') chips.push(el('span', { class: 'chip plain', title: 'What this walkthrough cost' }, `$${meta.cost.toFixed(meta.cost < 0.1 ? 3 : 2)}`))
   if (!exact) chips.push(el('span', { class: 'chip warn', title: 'The code has changed since this walkthrough was written; steps that no longer match are marked.' }, 'Outdated'))
@@ -259,7 +313,7 @@ function renderSetup(): void {
   const diff = view!.diff
   const task = view!.taskNow
   stopPolling()
-  actionButton.textContent = 'Generate'
+  setAction('generate')
   actionButton.disabled = diff.hunkCount === 0 || diff.tooBig
   copyButton.hidden = true
 
@@ -328,7 +382,7 @@ function renderSetup(): void {
 
 function startPolling(): void {
   if (pollTimer) return
-  actionButton.textContent = 'Cancel'
+  setAction('cancel')
   actionButton.disabled = false
   pollTimer = setInterval(() => void poll(), 2000)
   void poll()
@@ -355,14 +409,14 @@ async function poll(): Promise<void> {
 
 function renderGenerating(startedAt?: number): void {
   if (!view || view.shown) return // a regeneration keeps the walkthrough on screen
-  actionButton.textContent = 'Cancel'
+  setAction('cancel')
   copyButton.hidden = true
   const started = startedAt ?? view.job?.startedAt ?? Date.now()
   const deadline = view.job?.deadline ?? started + 300000
   const bar = el('div', { class: 'bar' }, el('div', { style: `width:${Math.min(96, ((Date.now() - started) / (deadline - started)) * 100)}%` }))
   main.replaceChildren(el('div', { class: 'generating' },
     el('h2', { text: 'Reading the change…' }),
-    el('p', { class: 'counts', text: `${view.diff.fileCount} files · ${view.diff.hunkCount} hunks · model ${view.job?.model ?? model}` }),
+    el('p', { class: 'counts', text: `${view.diff.fileCount} files · ${view.diff.hunkCount} hunks · ${agentOf(view.job?.agent ?? agent).name} · ${view.job?.model ?? model}` }),
     bar,
     el('p', { class: 'counts', text: `started ${ago(started)} · runs in the background, even with this panel closed` })))
   status(view.diff.what)
@@ -372,7 +426,7 @@ async function generate(): Promise<void> {
   if (!top || !source) return
   actionButton.disabled = true
   try {
-    const answer = await request('walkthrough.generate', { top, source, model, language, taskMode, taskText }, { timeoutMs: 60000 })
+    const answer = await request('walkthrough.generate', { top, source, agent, model, language, taskMode, taskText }, { timeoutMs: 60000 })
     if (answer.tooBig) { await loadView(); return }
     if (answer.cached) { status('Already written for exactly this change — showing it.'); await loadView(); return }
     startPolling()
@@ -408,8 +462,8 @@ async function copyMarkdown(): Promise<void> {
 function renderWalk(): void {
   const v = view!
   const shown = v.shown!
-  if (v.job?.running) { actionButton.textContent = 'Cancel'; actionButton.disabled = false } else {
-    actionButton.textContent = 'Regenerate'
+  if (v.job?.running) { setAction('cancel'); actionButton.disabled = false } else {
+    setAction('regenerate')
     actionButton.disabled = v.diff.hunkCount === 0 || v.diff.tooBig
   }
   copyButton.hidden = false
@@ -421,31 +475,30 @@ function renderWalk(): void {
       shown.summary ? el('p', { class: 'summary', text: shown.summary }) : null,
       metaChips(shown.meta, shown.exact)))
 
+  // The task, and the unread filter, as chips beside the title.
+  const chips = el('div', { class: 'chips' })
   if (v.task) {
-    const chip = el('button', { class: 'ask-chip', title: 'Show how the task maps to the change', onclick: () => { page = 'task'; render() } },
-      `${v.asks?.total ?? 0} requests mapped${v.task.changed ? ' · task changed' : ''}`)
-    walk.append(el('div', { class: 'chips' }, chip))
+    chips.append(el('button', { class: 'ask-chip', title: 'Show how the task maps to the change', onclick: () => { page = 'task'; render() } },
+      `${v.asks?.total ?? 0} requests mapped${v.task.changed ? ' · task changed' : ''}`))
   }
-
-  // Part tabs, when the walkthrough has more than one.
-  const stepList = steps()
-  const step = currentStep()
-  if (v.parts.length > 1) {
-    const parts = el('div', { class: 'parts' })
-    v.parts.forEach((p, i) => {
-      const b = el('button', { text: p.title, 'aria-current': String(step ? step.part === i : i === 0) })
-      b.onclick = () => {
-        const first = p.steps[0]
-        if (first) go(first.position)
-      }
-      parts.append(b)
-    })
-    walk.append(parts)
+  if (steps().some((s) => s.read)) {
+    chips.append(el('button', {
+      class: `ask-chip${unreadOnly ? ' seen' : ''}`, 'aria-pressed': String(unreadOnly),
+      title: 'Show only steps not yet read',
+      onclick: () => { unreadOnly = !unreadOnly; store.put('wt.unreadOnly', unreadOnly); render() },
+    }, unreadOnly ? 'unread only' : 'all steps'))
   }
+  if (chips.childElementCount) walk.append(chips)
 
-  if (step) {
-    walk.append(navRow(stepList, step), stepCard(step))
-    if (stepsOpen) walk.append(stepsList(stepList))
+  // The whole walkthrough as one document: every part with its steps in
+  // order, the code beside the words; j/k still walk it step by step.
+  for (const part of v.parts) {
+    const list = part.steps.filter((s) => !(unreadOnly && s.read))
+    if (!list.length) continue
+    walk.append(el('div', { class: 'part-head' },
+      el('h3', { text: part.title }),
+      part.blurb ? el('p', { class: 'blurb', text: part.blurb }) : null))
+    for (const s of list) walk.append(stepCard(s))
   }
   if (v.uncovered.length) walk.append(uncoveredBlock())
   main.replaceChildren(walk)
@@ -453,20 +506,6 @@ function renderWalk(): void {
   const stale = v.outdated ? ` · ${v.outdated} step${v.outdated === 1 ? '' : 's'} outdated` : ''
   const regen = v.job?.running ? ' · regenerating…' : ''
   status(`${v.diff.what}${stale}${regen}`)
-}
-
-function navRow(stepList: StepOut[], step: StepOut): HTMLElement {
-  const prev = el('button', { text: '‹', title: 'Previous step (k)' })
-  const next = el('button', { text: '›', title: 'Next step (j)' })
-  prev.disabled = !beforePos(step)
-  next.disabled = !afterPos(step)
-  prev.onclick = () => go(beforePos(step) ?? step.position)
-  next.onclick = () => go(afterPos(step) ?? step.position)
-  const toggle = el('button', { class: 'ghost', text: stepsOpen ? 'Hide steps' : 'All steps' })
-  toggle.onclick = () => { stepsOpen = !stepsOpen; render() }
-  return el('div', { class: 'nav' }, prev,
-    el('span', { class: 'position', text: `${stepList.indexOf(step) + 1} / ${stepList.length}` }),
-    next, el('span', { class: 'steps-toggle' }, toggle))
 }
 
 /** The next position each way, honouring the unread-only filter. */
@@ -486,39 +525,37 @@ function go(position: number): void {
   stepPos = position
   page = 'walk'
   render()
-  main.querySelector('.step')?.scrollIntoView({ block: 'start' })
+  scrollToStep(position)
 }
 
-function stepsList(stepList: StepOut[]): HTMLElement {
-  const box = el('div', { class: 'steps-list' })
-  for (const s of stepList) {
-    if (unreadOnly && s.read) continue
-    const dot = s.weight === 'key' ? '●' : s.weight === 'skim' ? '○' : '·'
-    const b = el('button', { 'aria-current': String(s.position === stepPos), onclick: () => go(s.position) },
-      el('span', { class: 'n', text: String(s.position) }),
-      el('span', { class: `dot ${s.weight}`, text: dot }),
-      el('span', { text: s.title }),
-      s.outdated ? el('span', { class: 'stale', text: 'changed' }) : null,
-      s.read ? el('span', { class: 'done', text: '✓' }) : null)
-    box.append(b)
-  }
-  const toggle = el('button', { class: 'ghost', text: unreadOnly ? 'Show all steps' : 'Show unread only' })
-  toggle.onclick = () => {
-    unreadOnly = !unreadOnly
-    store.put('wt.unreadOnly', unreadOnly)
-    const first = ordered()[0]
-    if (first) stepPos = first.position
-    render()
-  }
-  return el('div', {}, box, toggle)
+/** Put one step of the document at the top of the panel. */
+function scrollToStep(position: number): void {
+  main.querySelector(`.step[data-position="${position}"]`)?.scrollIntoView({ block: 'start' })
 }
 
 function stepCard(step: StepOut): HTMLElement {
-  const card = el('div', { class: 'step' })
+  const card = el('div', { class: 'step', 'data-position': String(step.position) })
   const weight = step.weight === 'key' ? el('span', { class: 'chip', text: 'Key change' }) : step.weight === 'skim' ? el('span', { class: 'chip', text: 'Context' }) : null
   const markBtn = el('button', { class: `mark${step.read ? ' on' : ''}`, title: 'Mark read (x)' }, step.read ? '✓ Read' : 'Mark read')
   markBtn.onclick = () => void toggleRead(step)
-  card.append(el('div', { class: 'title-row' }, el('h3', { text: step.title }), weight, markBtn))
+  card.append(el('div', { class: 'title-row' }, el('h3', { text: `${step.position}. ${step.title}` }), weight, markBtn))
+
+  // The files this step summarizes, each saying what moved in it; a chip
+  // jumps to that file's code below.
+  const files = filesOf(step.hunks)
+  if (files.length) {
+    const chips = el('div', { class: 'files-chips' })
+    files.slice(0, 4).forEach((f, i) => {
+      const chip = el('button', { class: 'file-chip', title: f.path },
+        el('span', { class: 'path', text: f.path }),
+        el('span', { class: 'a', text: `+${f.added}` }),
+        el('span', { class: 'd', text: `−${f.deleted}` }))
+      chip.onclick = () => card.querySelector(`[data-file="${i}"]`)?.scrollIntoView({ block: 'start' })
+      chips.append(chip)
+    })
+    if (files.length > 4) chips.append(el('span', { class: 'file-chip more', text: `+${files.length - 4} more` }))
+    card.append(chips)
+  }
 
   // The requests this step carries out.
   const asks = view?.asks?.list.filter((a) => a.steps.includes(step.position)) ?? []
@@ -539,7 +576,6 @@ function stepCard(step: StepOut): HTMLElement {
 }
 
 const mark = (a: AskOut): string => (a.coverage === 'seen' ? '✓' : a.coverage === 'partly' ? '◐' : '○')
-const short = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text)
 
 async function toggleRead(step: StepOut): Promise<void> {
   if (!top) return
@@ -556,8 +592,8 @@ async function toggleRead(step: StepOut): Promise<void> {
 
 // ── code ──────────────────────────────────────────────────────────────────
 
-async function fetchHunks(refs: HunkRef[]): Promise<void> {
-  const missing = [...new Set(refs.map((r) => r.id))].filter((id) => !hunksCache.has(id))
+async function fetchHunks(ids: string[]): Promise<void> {
+  const missing = [...new Set(ids)].filter((id) => !hunksCache.has(id))
   if (!missing.length || !top || !source) return
   try {
     const { hunks } = await request('walkthrough.hunks', { top, source, ids: missing }, { timeoutMs: 30000 })
@@ -566,54 +602,12 @@ async function fetchHunks(refs: HunkRef[]): Promise<void> {
 }
 
 /** Hunk refs → code blocks, with their lines fetched on demand. */
-async function renderHunkBlocks(container: HTMLElement, refs: HunkRef[], grouped = true): Promise<void> {
+async function renderHunkBlocks(container: HTMLElement, refs: HunkRef[], perFile = true): Promise<void> {
   const placeholder = el('div', { class: 'center', text: '…' })
   container.replaceChildren(placeholder)
-  await fetchHunks(refs)
-  const blocks: HTMLElement[] = []
-  let lastPath = ''
-  let previous: HunkLines | null | undefined
-  for (const ref of refs) {
-    const hunk = hunksCache.get(ref.id)
-    const head = el('div', { class: 'code-head' },
-      lastPath === ref.path ? null : el('span', { class: 'path', text: ref.path }),
-      el('span', { text: ref.status !== 'modified' ? ref.status : '' }),
-      el('span', { text: at(hunk) }),
-      hunk?.context ? el('span', { class: 'dim', text: short(hunk.context, 60) }) : null,
-      el('span', { class: 'count' }, el('span', { class: 'a', text: `+${ref.added}` }), ' ', el('span', { class: 'd', text: `−${ref.deleted}` })))
-    if (grouped && lastPath === ref.path && previous && hunk && hunk.newStart - (previous.newStart + countOf(previous)) > 1) {
-      blocks.push(el('div', { class: 'gap-line', text: '⋯ lines skipped' }))
-    }
-    lastPath = ref.path
-    previous = hunk
-    blocks.push(el('div', { class: 'code' }, head, hunk ? linesPre(hunk) : el('pre', {}, el('div', { class: 'ln' }, el('span', { class: 'no' }), el('span', { class: 'tx', text: '(hunk not available)' })))))
-  }
+  await fetchHunks(refs.map((r) => r.id))
+  const blocks = buildHunkBlocks(refs, (id) => hunksCache.get(id), perFile)
   container.replaceChildren(...(blocks.length ? blocks : [el('div', { class: 'center', text: 'Nothing to show.' })]))
-}
-
-const at = (hunk: HunkLines | undefined): string => (hunk ? `Line ${hunk.newStart}` : '')
-/** How many lines the hunk leaves in the new file: its context and added lines. */
-const countOf = (hunk: HunkLines): number => hunk.lines.filter((l) => l[0] !== '-').length
-
-/** A hunk's lines, drawn: old numbers on removed lines, new on the rest. */
-function linesPre(hunk: HunkLines): HTMLElement {
-  const pre = el('pre')
-  let old = hunk.oldStart, next = hunk.newStart
-  for (const line of hunk.lines) {
-    const kind = line[0]
-    if (kind === '+') { pre.append(lineRow('plus', next++, line.slice(1))); continue }
-    if (kind === '-') { pre.append(lineRow('minus', old++, line.slice(1))); continue }
-    if (kind === '\\') { pre.append(lineRow('meta', undefined, line)); continue }
-    old++
-    pre.append(lineRow(undefined, next++, line.slice(1) || ' '))
-  }
-  return pre
-}
-
-function lineRow(kind: string | undefined, number: number | undefined, text: string): HTMLElement {
-  return el('div', { class: `ln${kind ? ` ${kind}` : ''}` },
-    el('span', { class: 'no', text: number === undefined ? '' : String(number) }),
-    el('span', { class: 'tx', text }))
 }
 
 // ── not covered ───────────────────────────────────────────────────────────
@@ -724,15 +718,30 @@ document.addEventListener('keydown', (event) => {
       break
     case 'Escape':
       if (page === 'task') { page = 'walk'; render() }
-      else if (stepsOpen) { stepsOpen = false; render() }
       break
   }
 })
 
+// Model and language live behind the sliders; the scope stays in the open.
+copyButton.replaceChildren(icon('copy'))
+settingsButton.replaceChildren(icon('settings'))
+settingsButton.addEventListener('click', () => {
+  settingsRow.hidden = !settingsRow.hidden
+  settingsButton.setAttribute('aria-pressed', String(!settingsRow.hidden))
+})
+
 // While an agent works, the change moves under the walkthrough: refresh gently.
+// A turn being read never changes (its snapshots are fixed), but when one ends
+// it becomes a new option in the picker, so the scope list is what refreshes.
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
-orca.on('agent.status.changed', () => {
+orca.on('agent.status.changed', (event) => {
   if (!top || !source || pollTimer) return
+  if (source.kind === 'turn') {
+    if (event.state !== 'done' && event.state !== 'waiting') return
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => { refreshTimer = null; void loadScopes() }, 2000)
+    return
+  }
   if (!['uncommitted', 'staged', 'unstaged', 'branch'].includes(source.kind)) return
   if (refreshTimer) clearTimeout(refreshTimer)
   refreshTimer = setTimeout(() => { refreshTimer = null; void loadView() }, 2000)
@@ -750,6 +759,7 @@ orca.on('workspace.changed', ({ context }) => {
 
 void (async () => {
   unreadOnly = store.get('wt.unreadOnly', false)
-  await fillSettings()
+  await fillSettings() // a quiet first draw, before the worker has answered
   await boot()
+  await fillSettings() // now with the agents Orca has enabled
 })()

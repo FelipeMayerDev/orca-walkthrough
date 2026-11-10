@@ -4,6 +4,7 @@
 // the diff is already beside it.
 
 import { fileTotals, type Overlay, type TaskOverlay, type Walkthrough } from './walkthrough'
+import { agentOf } from './agents'
 
 const NOTE_LABEL: Record<string, string> = { choice: 'Decision', upkeep: 'Upkeep', gap: 'Limitation', divergence: 'Divergence', untested: 'Untested' }
 
@@ -19,11 +20,11 @@ const code = (s: string): string => {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
-export function toMarkdown(view: Overlay, walkthrough: Pick<Walkthrough, 'title' | 'summary'>, { what = '', model = '', language = '', cost = null }: { what?: string; model?: string; language?: string; cost?: number | null } = {}, task: TaskOverlay | null = null, taskLabel = ''): string {
+export function toMarkdown(view: Overlay, walkthrough: Pick<Walkthrough, 'title' | 'summary'>, { what = '', agent = 'claude', model = '', language = '', cost = null }: { what?: string; agent?: string; model?: string; language?: string; cost?: number | null } = {}, task: TaskOverlay | null = null, taskLabel = ''): string {
   // The bounds let a walkthrough pasted into a pull request's description be left out when that description is read as a task.
   const out: string[] = [MARK_START, `## ${line(walkthrough.title) || 'Walkthrough'}`, '']
   if (walkthrough.summary?.trim()) out.push(walkthrough.summary.trim(), '')
-  const about = [what && line(what), model, language, typeof cost === 'number' ? `$${cost.toFixed(cost < 0.1 ? 3 : 2)}` : ''].filter(Boolean)
+  const about = [what && line(what), agent && agent !== 'claude' ? agentOf(agent).name : '', model, language, typeof cost === 'number' ? `$${cost.toFixed(cost < 0.1 ? 3 : 2)}` : ''].filter(Boolean)
   if (about.length) out.push(`<sub>${about.join(' · ')}</sub>`, '')
   if (task) out.push(...taskMarkdown(task, taskLabel))
 
@@ -37,7 +38,10 @@ export function toMarkdown(view: Overlay, walkthrough: Pick<Walkthrough, 'title'
       for (const n of s.notes) out.push(`> **${NOTE_LABEL[n.kind] ?? n.kind}:** ${line(n.text)}`, '')
       if (s.outdated) out.push(`_${s.missing} of the ${plural(s.hunkIds.length, 'hunk')} this step described changed or are gone._`, '')
       const files = fileTotals(s.found)
-      if (files.length) out.push(files.map((f) => `${code(f.path)} +${f.added} −${f.deleted}`).join(' · '), '')
+      if (files.length) out.push(files.map((f) => {
+        const ranges = f.ranges.map(([a, b]) => (a === b ? `L${a}` : `L${a}–${b}`)).join(', ')
+        return `${code(f.path)} +${f.added} −${f.deleted}${ranges ? ` \`${ranges}\`` : ''}`
+      }).join(' · '), '')
     }
   }
 

@@ -11,7 +11,7 @@
   },
   "license": "MIT",
   "engines": {
-    "orca": ">=1.4.246"
+    "orca": ">=1.4.248"
   },
   "pluginApi": 1,
   "main": "src/worker.ts",
@@ -24,11 +24,20 @@
         "entry": "panel/index.html"
       }
     ],
+    "events": [{ "on": "agent.status.changed" }],
+    "statusBarItems": [
+      {
+        "id": "turn",
+        "icon": "agent",
+        "text": "",
+        "tooltip": "Recording what an agent changes this turn"
+      }
+    ],
     "settings": [
       {
         "key": "model",
         "title": "Model",
-        "description": "Which Claude model reads the diff. Haiku is fine for most changes.",
+        "description": "The default model when Claude reads the diff (the panel offers each enabled agent's own list beside).",
         "type": "string",
         "enum": ["haiku", "sonnet", "opus"],
         "enumLabels": ["Haiku — fast and cheap", "Sonnet — better grouping on large or subtle changes", "Opus — the most careful reading, the highest cost"],

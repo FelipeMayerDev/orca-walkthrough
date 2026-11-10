@@ -13,10 +13,24 @@ export type WorkspaceInfo = { path: string; name: string; branch: string | null 
 export type StateAnswer = {
   workspace: WorkspaceInfo | null
   repo: Repo | null
-  claude: string | null
+  /** The agents whose CLIs can generate, whether each is installed, and the models each offers — Orca's own catalog when it can be read. */
+  agents: { key: string; name: string; available: boolean; models: { key: string; label: string; isDefault: boolean }[] }[]
   error: string | null
   /** Every workspace Orca knows, for a manual pick when the focused one can't be matched. */
   choices: WorkspaceInfo[]
+}
+
+/** One recorded turn, for the panel's picker. `prompt` is clipped for the option's label; the trees let the panel build the Source, like a commit's hash does. */
+export type TurnSummary = {
+  id: string
+  startedAt: number
+  endedAt: number | null
+  outcome: string | null
+  complete: boolean
+  agent: string | null
+  prompt: string
+  before: string | null
+  after: string | null
 }
 
 export type ScopesAnswer = {
@@ -26,6 +40,7 @@ export type ScopesAnswer = {
   commits: Commit[]
   pulls: PullRequest[]
   prError: string | null
+  turns: TurnSummary[]
 }
 
 export type FileSummary = {
@@ -69,6 +84,8 @@ export type StepOut = {
 
 export type EntryMeta = {
   key: string
+  /** The agent whose CLI wrote this ('claude' for everything made before there were others). */
+  agent: string
   model: string
   language: string
   generatedAt: number
@@ -94,7 +111,7 @@ export type ViewAnswer = {
   /** The task found now (auto mode), for the exact key. */
   taskNow: Task | null
   asks: { list: AskOut[]; met: number; total: number; outside: number[] } | null
-  job: { running: boolean; startedAt: number; deadline: number; model: string } | null
+  job: { running: boolean; startedAt: number; deadline: number; agent: string; model: string } | null
 }
 
 export type GenerateAnswer = { cached: boolean; key: string; tooBig?: boolean; promptChars?: number }
@@ -109,20 +126,20 @@ export type MarkdownAnswer = { text: string }
 
 declare module 'orca' {
   interface PluginRequests {
-    /** The focused workspace, its repository, and whether claude can run. `pick`: a workspace chosen by hand when matching failed. */
+    /** The focused workspace, its repository, and the agents whose CLIs can generate. `pick`: a workspace chosen by hand when matching failed. */
     'walkthrough.state': { input: { pick?: string }; output: StateAnswer }
     /** What there is to read: branches, commits and pull requests. */
     'walkthrough.scopes': { input: { top: string }; output: ScopesAnswer }
     /** A source's diff as it is now, without hunk contents. */
     'walkthrough.diff': { input: { top: string; source: Source }; output: DiffAnswer }
     /** Everything the panel shows for a source: the walkthrough over the diff as it is now. */
-    'walkthrough.view': { input: { top: string; source: Source; model?: string; language?: string }; output: ViewAnswer }
+    'walkthrough.view': { input: { top: string; source: Source; agent?: string; model?: string; language?: string }; output: ViewAnswer }
     /** Hunk contents by id, for the step being read. */
     'walkthrough.hunks': { input: { top: string; source: Source; ids: string[] }; output: { hunks: Record<string, HunkLines> } }
     /** The task found for a source (auto mode), to show before generating. */
     'walkthrough.task': { input: { top: string; source: Source }; output: TaskAnswer }
     /** Starts a generation in the background. */
-    'walkthrough.generate': { input: { top: string; source: Source; model?: string; language?: string; taskMode?: string; taskText?: string }; output: GenerateAnswer }
+    'walkthrough.generate': { input: { top: string; source: Source; agent?: string; model?: string; language?: string; taskMode?: string; taskText?: string }; output: GenerateAnswer }
     /** Looks at the running job; a finished one becomes an entry. */
     'walkthrough.poll': { input: { top: string; source: Source }; output: PollAnswer }
     /** Stops the running job. */

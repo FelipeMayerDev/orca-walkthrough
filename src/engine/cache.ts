@@ -18,9 +18,10 @@ import type { DigestFile } from './digest'
 export const codeKey = (files: DigestFile[]): string => longHash(JSON.stringify(
   files.filter((f) => !f.generated && !f.unread).map((f) => [f.path, f.status, f.hunks.map((h) => h.id)])))
 
-/** `task`: taskKey, "" for none, so a walkthrough without a task keeps the key it always had. */
-export function cacheKey({ top, source, model, language, preferences = '', files, task = '' }: { top: string; source: string; model: string; language: string; preferences?: string; files: DigestFile[]; task?: string }): string {
-  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, model, language, hash(String(preferences).trim()), codeKey(files), ...(task ? [task] : [])]))
+/** `task`: taskKey, "" for none, so a walkthrough without a task keeps the key it always had.
+ *  `agent`: kept out when 'claude', so the walkthroughs already on disk keep their names. */
+export function cacheKey({ top, source, agent = 'claude', model, language, preferences = '', files, task = '' }: { top: string; source: string; agent?: string; model: string; language: string; preferences?: string; files: DigestFile[]; task?: string }): string {
+  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, ...(agent && agent !== 'claude' ? [agent] : []), model, language, hash(String(preferences).trim()), codeKey(files), ...(task ? [task] : [])]))
 }
 
 /** One pointer (the walkthrough shown last) and one running job per repository and source. */
