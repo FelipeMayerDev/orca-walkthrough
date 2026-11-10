@@ -9,7 +9,7 @@ or whichever Orca runs — groups the diff's hunks into steps, orders them so ea
 builds on the last, and explains each one with its code alongside. It explains; it
 does not judge.
 
-![Walkthrough demo](images/demo.gif)
+![Walkthrough demo](https://raw.githubusercontent.com/FelipeMayerDev/orca-walkthrough/media/demo.gif)
 
 ## Install
 
