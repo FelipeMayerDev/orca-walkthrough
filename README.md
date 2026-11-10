@@ -1,17 +1,44 @@
 # Walkthrough for Orca
 
+![Walkthrough cover](images/cover.webp)
+
 A port of [herdr-walkthrough](https://github.com/dmazlum/herdr-walkthrough) as an
 [Orca](https://github.com/stablyai/orca) plugin: **read a diff in the order it makes
-sense.** Instead of listing files alphabetically, Claude groups the diff's hunks into
-steps, orders them so each builds on the last, and explains each one with its code
-alongside. It explains; it does not judge.
+sense.** Instead of listing files alphabetically, an agent — Claude, Codex, OpenCode,
+or whichever Orca runs — groups the diff's hunks into steps, orders them so each
+builds on the last, and explains each one with its code alongside. It explains; it
+does not judge.
+
+![Walkthrough demo](images/demo.gif)
+
+## Install
+
+```sh
+orca plugin install FelipeMayerDev/orca-walkthrough
+```
+
+Orca shows the requested permissions and an approval fingerprint. Review them,
+then repeat the command with `--approve <fingerprint>`. It is also listed in Orca's
+**Community** plugins as **Walkthrough**
+([plugin page](https://onorca.dev/plugins/felipemayerdev/orca-walkthrough)).
+
+Requires Orca 1.4.248+, `git`, and at least one agent CLI that Orca has enabled and
+that is logged in (Claude Code, Codex, OpenCode, Oh My Pi, ZCode or Hermes). Pull
+requests are read with the GitHub CLI, `gh`.
+
+**What it can see and send.** The plugin runs a trusted worker with your user
+account's access and requests `workspace:read`, `agent:read` and `settings:own`. It
+reads the repository's diff and, for task matching, Claude Code's local transcripts.
+When — and only when — you press **Generate**, the diff is sent to the agent you
+picked, and through it to that agent's model provider. It keeps no telemetry of its
+own.
 
 Open the **Walkthrough** panel in Orca's right sidebar, pick what to read —
 uncommitted work, the staged part, the branch, one commit, a pull request, or the
 last turn of an agent — and press **Generate**. The walkthrough reads as one
 document: every part with its steps in order, the code beside the words, what no
 step covers at the end. Walk it with `j`/`k`, mark steps read with `x`, show
-only the unread with `u`.
+only the unread with `u`, see how it matches the task with `t`, go back with `Esc`.
 
 ## What it does
 
@@ -88,11 +115,11 @@ agents without transcripts the walkthrough simply explains without matching.
 
 ## Settings
 
-In Orca's Settings → Plugins → Walkthrough (or behind the ⚙ in the panel):
+In Orca's Settings → Plugins → Walkthrough, and behind the ⚙ in the panel:
 
-- **Agent** — which of Orca's enabled agents reads the diff: the ones whose CLIs
-  are installed (Claude, ZCode, Codex, OpenCode, Oh My Pi, Hermes…), each with
-  its own model list — Orca's catalog, the account's default first.
+- **Agent** (panel only) — which of Orca's enabled agents reads the diff: the ones
+  whose CLIs are installed (Claude, ZCode, Codex, OpenCode, Oh My Pi, Hermes…),
+  each with its own model list — Orca's catalog, the account's default first.
 - **Model** — Claude's default when no agent is chosen: Haiku (fast and cheap),
   Sonnet or Opus.
 - **Language** — the language the walkthrough is written in (prose only; code

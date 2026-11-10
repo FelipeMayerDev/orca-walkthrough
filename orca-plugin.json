@@ -10,6 +10,11 @@
     "name": "focky"
   },
   "license": "MIT",
+  "repository": "https://github.com/FelipeMayerDev/orca-walkthrough",
+  "cover": {
+    "path": "images/cover.webp",
+    "alt": "Walkthrough wordmark beside the plugin's panel: a diff explained step by step, with each step's files and code."
+  },
   "engines": {
     "orca": ">=1.4.248"
   },
