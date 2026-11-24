@@ -378,9 +378,22 @@ export default function activate(orca: OrcaWorkerApi): void {
   // Where the files are: here, or (forwarded) on the server.
   handle('walkthrough.write', (file: WalkthroughFile) => writeWalkthroughFile(file))
 
+  /** This Orca's id for the workspace at `top`: learned from the panel, else looked up (a restarted worker forgets). */
+  const workspaceIdFor = async (top: string): Promise<string | undefined> => {
+    const known = workspaceOf.get(top)
+    if (known) return known
+    const { workspaces } = await orca.host.call('workspace.list').catch(() => ({ workspaces: [] as { id: string; path: string }[] }))
+    const listed = workspaces.find((w) => w.path === top)?.id
+    // A paired server's workspace is not listed here; the focused one names itself `<repo>::<path there>`.
+    const focused = listed ? undefined : (await orca.host.call('workspace.readContext').catch(() => null))?.workspaceId
+    const id = listed ?? (focused?.endsWith(`::${top}`) ? focused : undefined)
+    if (id) workspaceOf.set(top, id)
+    return id
+  }
+
   // Opening is this Orca's own: its window shows the tab, whichever host writes the file.
   orca.panels.handle('walkthrough.open', async (input) => {
-    const workspaceId = workspaceOf.get(input.top)
+    const workspaceId = await workspaceIdFor(input.top)
     if (!workspaceId) throw invalid('This workspace is not known yet: reopen the panel.')
     const via = onServer.get(input.top)
     const file: WalkthroughFile = { ...input, ...(via ? { server: via } : {}) }
@@ -391,7 +404,7 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   // Asking an agent about a step: this Orca's own terminals and agents, never forwarded.
   orca.panels.handle('walkthrough.agents', async ({ top, agent }) => {
-    const workspaceId = workspaceOf.get(top)
+    const workspaceId = await workspaceIdFor(top)
     const { agents } = await orca.host.call('agents.list', workspaceId ? { workspaceId } : undefined).catch(() => ({ agents: [] }))
     const running = agents.filter((a) => a.terminalId).map((a) => ({ terminalId: a.terminalId!, title: a.title, agent: a.agent, state: a.state }))
     // What can start one: the agents found here, else the one that wrote the walkthrough.
@@ -408,7 +421,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       await orca.host.call('terminal.focus', { terminalId }).catch(() => undefined)
       return { terminalId }
     }
-    const workspaceId = workspaceOf.get(top)
+    const workspaceId = await workspaceIdFor(top)
     if (!workspaceId) throw invalid('This workspace is not known yet: reopen the panel.')
     const launched = await orca.host.call('agent.launch', { workspaceId, agent: agentOf(agent ?? DEFAULT_AGENT).orcaKeys[0] ?? 'claude', prompt: text })
     await orca.host.call('terminal.focus', { terminalId: launched.terminalId }).catch(() => undefined)
