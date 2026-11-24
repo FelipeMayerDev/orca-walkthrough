@@ -162,12 +162,37 @@ const hunkRef = (id: string, header: string, added: number, deleted: number, pat
 // ponytail: through the CLI's `plugin dev request`, which reaches only a dev
 // plugin keyed `local.walkthrough`; a host API for it would replace this.
 const SERVER_PLUGIN = 'local.walkthrough'
-const orcaCli = (): string => process.env.ORCA_CLI
-  ?? (process.platform === 'win32' ? join(dirname(process.execPath), 'resources', 'bin', 'orca.exe') : 'orca')
+// The worker may run in its own Node, so the CLI is looked for in each place it lives.
+const cliCandidates = (): string[] => [
+  process.env.ORCA_CLI,
+  ...(process.platform === 'win32'
+    ? [
+        join(dirname(process.execPath), 'resources', 'bin', 'orca.exe'),
+        join(dirname(process.execPath), '..', 'bin', 'orca.exe'),
+        process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs', 'orca', 'resources', 'bin', 'orca.exe'),
+        'orca.exe',
+      ]
+    : ['orca', 'orca-ide']),
+].filter((c): c is string => Boolean(c))
+let cliFound: string | undefined
+let cliTried = ''
+async function orcaCliPath(): Promise<string | null> {
+  if (cliFound) return cliFound
+  const tried: string[] = []
+  for (const c of cliCandidates()) {
+    const r = await store.exec(c, ['--version']).catch((e: Error) => { tried.push(`${c}: ${e.message}`); return null })
+    if (r) { cliFound = c; return c }
+  }
+  cliTried = `execPath ${process.execPath}; ${tried.join('; ')}`
+  return null
+}
+let serverWhy = ''
 const onServer = new Map<string, string>() // workspace path or repository top → runtime id
 
 async function forward(runtime: string, name: string, input: unknown): Promise<any> {
-  const r = await store.exec(orcaCli(), [
+  const cli = await orcaCliPath()
+  if (!cli) throw new Error(`Orca CLI not found (${cliTried})`)
+  const r = await store.exec(cli, [
     'plugin', 'dev', 'request', SERVER_PLUGIN, name, '--data', JSON.stringify(input ?? {}),
     '--panel', 'walkthrough', '--environment', runtime, '--timeout-ms', '120000',
   ])
@@ -178,8 +203,10 @@ async function forward(runtime: string, name: string, input: unknown): Promise<a
 // The paired servers this client reaches: Orca lists their workspaces apart,
 // so `workspace.list` here leaves them out and only the CLI names them.
 async function pairedRuntimes(): Promise<string[]> {
-  const r = await store.exec(orcaCli(), ['worktree', 'list', '--json']).catch(() => null)
-  if (!r || r.code !== 0) return []
+  const cli = await orcaCliPath()
+  if (!cli) { serverWhy = `Orca CLI not found (${cliTried})`; return [] }
+  const r = await store.exec(cli, ['worktree', 'list', '--json']).catch((e: Error) => { serverWhy = e.message; return null })
+  if (!r || r.code !== 0) { serverWhy ||= `worktree list: ${r?.stderr || r?.stdout}`; return [] }
   try {
     const scope = JSON.parse(r.stdout)?.result?.hostScope ?? {}
     const ids: string[] = [...(scope.hostIds ?? []), ...(scope.omittedHostIds ?? [])]
@@ -192,13 +219,18 @@ async function serverState(workspaceId: string | undefined): Promise<StateAnswer
   const at = workspaceId?.indexOf('::') ?? -1
   if (!workspaceId || at < 0) return null
   const path = workspaceId.slice(at + 2)
-  for (const runtime of await pairedRuntimes()) {
-    const answer: StateAnswer | null = await forward(runtime, 'walkthrough.state', { path }).catch(() => null)
-    if (!answer?.workspace) continue
+  serverWhy = ''
+  const runtimes = await pairedRuntimes()
+  if (!runtimes.length) { serverWhy ||= 'no paired Orca server'; return null }
+  const why: string[] = []
+  for (const runtime of runtimes) {
+    const answer: StateAnswer | null = await forward(runtime, 'walkthrough.state', { path }).catch((e: Error) => { why.push(e.message); return null })
+    if (!answer?.workspace) { if (answer) why.push(`${runtime}: ${answer.error ?? 'unknown path'}`); continue }
     onServer.set(answer.workspace.path, runtime)
     if (answer.repo) onServer.set(answer.repo.top, runtime)
     return answer
   }
+  serverWhy = why.join('; ')
   return null
 }
 
@@ -233,7 +265,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!match) {
       return {
         workspace: null, repo: null, agents: agentsOf([]), choices,
-        error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below. (id ${context.workspaceId ?? 'none'}; listed: ${workspaces.filter((w) => w.name === context.displayName).map((w) => `${w.id} @ ${w.hostId}`).join(', ') || 'none by that name'})`,
+        error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below. (id ${context.workspaceId ?? 'none'}; listed: ${workspaces.filter((w) => w.name === context.displayName).map((w) => `${w.id} @ ${w.hostId}`).join(', ') || 'none by that name'}${serverWhy ? `; server: ${serverWhy}` : ''})`,
       }
     }
     const runtime = match.hostId?.startsWith('runtime:') ? match.hostId.slice('runtime:'.length) : null
