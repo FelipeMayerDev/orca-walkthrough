@@ -175,6 +175,33 @@ async function forward(runtime: string, name: string, input: unknown): Promise<a
   return JSON.parse(r.stdout)
 }
 
+// The paired servers this client reaches: Orca lists their workspaces apart,
+// so `workspace.list` here leaves them out and only the CLI names them.
+async function pairedRuntimes(): Promise<string[]> {
+  const r = await store.exec(orcaCli(), ['worktree', 'list', '--json']).catch(() => null)
+  if (!r || r.code !== 0) return []
+  try {
+    const scope = JSON.parse(r.stdout)?.result?.hostScope ?? {}
+    const ids: string[] = [...(scope.hostIds ?? []), ...(scope.omittedHostIds ?? [])]
+    return [...new Set(ids.filter((id) => id.startsWith('runtime:')).map((id) => id.slice('runtime:'.length)))]
+  } catch { return [] }
+}
+
+/** A focused workspace on a paired server: its id ends in `::<path there>`; the first server that knows that path reads it. */
+async function serverState(workspaceId: string | undefined): Promise<StateAnswer | null> {
+  const at = workspaceId?.indexOf('::') ?? -1
+  if (!workspaceId || at < 0) return null
+  const path = workspaceId.slice(at + 2)
+  for (const runtime of await pairedRuntimes()) {
+    const answer: StateAnswer | null = await forward(runtime, 'walkthrough.state', { path }).catch(() => null)
+    if (!answer?.workspace) continue
+    onServer.set(answer.workspace.path, runtime)
+    if (answer.repo) onServer.set(answer.repo.top, runtime)
+    return answer
+  }
+  return null
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
   // Every handler but the state one is keyed by `top`: a server's top goes there.
   const handle = ((name: string, fn: (input: any) => unknown) =>
@@ -199,6 +226,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     // A reader's explicit choice overrides only when matching failed.
     if (!match && pick) match = workspaces.find((w) => w.path === pick) ?? null
     const choices = workspaces.map((w) => ({ path: w.path, name: w.name, branch: w.branch ?? null }))
+    if (!match && !input?.path) {
+      const remote = await serverState(context.workspaceId)
+      if (remote) return { ...remote, choices: [...remote.choices, ...choices] }
+    }
     if (!match) {
       return {
         workspace: null, repo: null, agents: agentsOf([]), choices,
