@@ -130,6 +130,10 @@ declare module 'orca' {
   interface PluginRequests {
     /** The focused workspace, its repository, and the agents whose CLIs can generate. `pick`: a workspace chosen by hand when matching failed; `path`: read this workspace whatever is focused (a client forwarding to this server). */
     'walkthrough.state': { input: { pick?: string; path?: string }; output: StateAnswer }
+    /** Writes the small file an editor tab reads a walkthrough from; forwarded to the server that has the workspace. */
+    'walkthrough.write': { input: { top: string; source: Source; agent: string; model: string; language: string; server?: string }; output: { path: string } }
+    /** Opens the walkthrough of `source` in an editor tab of this Orca's window. */
+    'walkthrough.open': { input: { top: string; source: Source; agent: string; model: string; language: string }; output: { path: string } }
     /** What there is to read: branches, commits and pull requests. */
     'walkthrough.scopes': { input: { top: string }; output: ScopesAnswer }
     /** A source's diff as it is now, without hunk contents. */

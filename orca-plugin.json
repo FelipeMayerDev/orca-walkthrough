@@ -29,6 +29,15 @@
         "entry": "panel/index.html"
       }
     ],
+    "customEditors": [
+      {
+        "id": "walkthrough",
+        "title": "Walkthrough",
+        "extensions": [".walkthrough.json"],
+        "entry": "editor/index.html",
+        "priority": "default"
+      }
+    ],
     "events": [{ "on": "agent.status.changed" }],
     "statusBarItems": [
       {

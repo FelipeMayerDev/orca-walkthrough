@@ -22,6 +22,7 @@ const modelSelect = byId<HTMLSelectElement>('model')
 const languageSelect = byId<HTMLSelectElement>('language')
 const actionButton = byId<HTMLButtonElement>('action')
 const copyButton = byId<HTMLButtonElement>('copy')
+const openButton = byId<HTMLButtonElement>('open')
 const repoLabel = byId<HTMLButtonElement>('repo')
 const statusLine = byId<HTMLDivElement>('status')
 const controls = byId<HTMLDivElement>('controls')
@@ -332,6 +333,7 @@ function renderSetup(): void {
   setAction('generate')
   actionButton.disabled = diff.hunkCount === 0 || diff.tooBig
   copyButton.hidden = true
+  openButton.hidden = true
 
   const counts = el('p', { class: 'counts' },
     el('b', { text: String(diff.fileCount) }), ' file', diff.fileCount === 1 ? '' : 's',
@@ -427,6 +429,7 @@ function renderGenerating(startedAt?: number): void {
   if (!view || view.shown) return // a regeneration keeps the walkthrough on screen
   setAction('cancel')
   copyButton.hidden = true
+  openButton.hidden = true
   const started = startedAt ?? view.job?.startedAt ?? Date.now()
   const deadline = view.job?.deadline ?? started + 300000
   const bar = el('div', { class: 'bar' }, el('div', { style: `width:${Math.min(96, ((Date.now() - started) / (deadline - started)) * 100)}%` }))
@@ -460,6 +463,15 @@ async function cancel(): Promise<void> {
   await loadView()
 }
 
+/** The walkthrough, wide: an editor tab with an overview and one step at a time. */
+async function openTab(): Promise<void> {
+  if (!top || !source) return
+  openButton.disabled = true
+  try { await request('walkthrough.open', { top, source, agent, model, language }, { timeoutMs: 60000 }) }
+  catch (e) { status(`Could not open the tab: ${message(e)}`) }
+  openButton.disabled = false
+}
+
 async function copyMarkdown(): Promise<void> {
   if (!top || !source) return
   copyButton.disabled = true
@@ -483,13 +495,15 @@ function renderWalk(): void {
     actionButton.disabled = v.diff.hunkCount === 0 || v.diff.tooBig
   }
   copyButton.hidden = false
+  openButton.hidden = false
 
   const walk = el('div', { class: 'walk' })
   walk.append(
     el('div', { class: 'head' },
       el('h2', { text: shown.title }),
       shown.summary ? el('p', { class: 'summary', text: shown.summary }) : null,
-      metaChips(shown.meta, shown.exact)))
+      metaChips(shown.meta, shown.exact),
+      el('button', { class: 'open-tab', onclick: () => void openTab() }, icon('open', 13), 'Read it in a tab, step by step')))
 
   // The task, and the unread filter, as chips beside the title.
   const chips = el('div', { class: 'chips' })
@@ -706,6 +720,7 @@ actionButton.onclick = () => {
   else void generate()
 }
 copyButton.onclick = () => void copyMarkdown()
+openButton.onclick = () => void openTab()
 
 document.addEventListener('keydown', (event) => {
   if (event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return
@@ -740,6 +755,7 @@ document.addEventListener('keydown', (event) => {
 
 // Model and language live behind the sliders; the scope stays in the open.
 copyButton.replaceChildren(icon('copy'))
+openButton.replaceChildren(icon('open'))
 settingsButton.replaceChildren(icon('settings'))
 settingsButton.addEventListener('click', () => {
   settingsRow.hidden = !settingsRow.hidden

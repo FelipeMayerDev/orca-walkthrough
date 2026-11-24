@@ -122,6 +122,11 @@
       .walk .head { display: flex; flex-direction: column; gap: 4px; }
       .walk h2 { margin: 0; font-size: 16px; line-height: 1.35; }
       .walk .summary { margin: 0; color: var(--orca-muted-foreground); font-size: 12.5px; }
+      .walk .open-tab {
+        align-self: flex-start; display: inline-flex; gap: 6px; align-items: center; margin-top: 4px;
+        border-color: color-mix(in srgb, var(--orca-primary) 50%, var(--orca-border)); color: var(--orca-primary); font-size: 12px;
+      }
+      .walk .open-tab:hover { background: color-mix(in srgb, var(--orca-primary) 10%, transparent); }
       .chips { display: flex; flex-wrap: wrap; gap: 4px; }
       .chip {
         display: inline-flex; align-items: center; gap: 4px;

@@ -7,6 +7,7 @@ import type { OrcaWorkerApi, PluginEvents } from 'orca/worker'
 import './protocol'
 import { homedir } from 'node:os'
 import { readFileSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { matchFocused } from './workspace'
 import * as store from './store'
@@ -197,6 +198,30 @@ const NOT_LOADED = /not a loaded development plugin|only reaches development plu
 export const SERVER_SETUP =
   'git clone https://github.com/FelipeMayerDev/orca-walkthrough ~/.local/share/orca-walkthrough && orca plugin dev load ~/.local/share/orca-walkthrough'
 const onServer = new Map<string, string>() // workspace path or repository top → runtime id
+const workspaceOf = new Map<string, string>() // workspace path or repository top → the id this Orca opens editors in
+
+// A walkthrough opens in an editor tab from a small file naming what it reads:
+// `.walkthrough/<source>.walkthrough.json` in the workspace, kept out of git.
+export type WalkthroughFile = { top: string; source: Source; agent: string; model: string; language: string; /** The paired server it is on, for the tab to name as `via`. */ server?: string }
+const fileName = (source: Source): string =>
+  `${sourceKey(source).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'change'}.walkthrough.json`
+
+async function writeWalkthroughFile(file: WalkthroughFile): Promise<{ path: string }> {
+  const rel = `.walkthrough/${fileName(file.source)}`
+  await mkdir(join(file.top, '.walkthrough'), { recursive: true })
+  await writeFile(join(file.top, rel), `${JSON.stringify(file, null, 2)}\n`, 'utf8')
+  // Out of `git status` without touching a tracked .gitignore.
+  const r = await store.exec('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: file.top }).catch(() => null)
+  const exclude = r?.code === 0 ? join(file.top, r.stdout.trim()) : null
+  if (exclude) {
+    const text = await readFile(exclude, 'utf8').catch(() => '')
+    if (!text.split('\n').includes('.walkthrough/')) {
+      await mkdir(dirname(exclude), { recursive: true })
+      await writeFile(exclude, `${text}${text && !text.endsWith('\n') ? '\n' : ''}.walkthrough/\n`, 'utf8')
+    }
+  }
+  return { path: rel }
+}
 
 async function forward(runtime: string, name: string, input: unknown): Promise<any> {
   const cli = await orcaCliPath()
@@ -246,10 +271,12 @@ async function serverState(workspaceId: string | undefined): Promise<StateAnswer
 
 export default function activate(orca: OrcaWorkerApi): void {
   // Every handler but the state one is keyed by `top`: a server's top goes there.
+  // An editor tab names its server itself (`via`): it may outlive the panel that taught this worker.
   const handle = ((name: string, fn: (input: any) => unknown) =>
     orca.panels.handle(name as never, (async (input: any) => {
-      const runtime = typeof input?.top === 'string' ? onServer.get(input.top) : undefined
-      return runtime ? forward(runtime, name, input) : fn(input)
+      const { via, ...rest } = input ?? {}
+      const runtime = (typeof rest.top === 'string' ? onServer.get(rest.top) : undefined) ?? via
+      return runtime ? forward(runtime, name, rest) : fn(rest)
     }) as never)) as typeof orca.panels.handle
 
   orca.panels.handle('walkthrough.state', async (input): Promise<StateAnswer> => {
@@ -270,7 +297,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     const choices = workspaces.map((w) => ({ path: w.path, name: w.name, branch: w.branch ?? null }))
     if (!match && !input?.path) {
       const remote = await serverState(context.workspaceId)
-      if (remote) return { ...remote, choices: [...remote.choices, ...choices] }
+      if (remote) {
+        if (context.workspaceId) for (const p of [remote.workspace?.path, remote.repo?.top]) if (p) workspaceOf.set(p, context.workspaceId)
+        return { ...remote, choices: [...remote.choices, ...choices] }
+      }
     }
     if (!match && serverMissing) {
       return {
@@ -288,7 +318,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (runtime) {
       const answer: StateAnswer = await forward(runtime, 'walkthrough.state', { path: match.path })
       onServer.set(match.path, runtime)
-      if (answer.repo) onServer.set(answer.repo.top, runtime)
+      workspaceOf.set(match.path, match.id)
+      if (answer.repo) { onServer.set(answer.repo.top, runtime); workspaceOf.set(answer.repo.top, match.id) }
       return { ...answer, choices }
     }
     if (agentsChecked === undefined) {
@@ -308,12 +339,28 @@ export default function activate(orca: OrcaWorkerApi): void {
       agentsChecked = usable.length ? usable : checked
     }
     const repo = await store.repository(match.path)
+    workspaceOf.set(match.path, match.id)
+    if (repo) workspaceOf.set(repo.top, match.id)
     return {
       workspace: input?.path
         ? { path: match.path, name: match.name, branch: match.branch?.replace(/^refs\/heads\//, '') || null }
         : { path: match.path, name: context.displayName, branch: context.branch || null },
       repo, agents: agentsOf(agentsChecked), error: null, choices,
     }
+  })
+
+  // Where the files are: here, or (forwarded) on the server.
+  handle('walkthrough.write', (file: WalkthroughFile) => writeWalkthroughFile(file))
+
+  // Opening is this Orca's own: its window shows the tab, whichever host writes the file.
+  orca.panels.handle('walkthrough.open', async (input) => {
+    const workspaceId = workspaceOf.get(input.top)
+    if (!workspaceId) throw invalid('This workspace is not known yet: reopen the panel.')
+    const via = onServer.get(input.top)
+    const file: WalkthroughFile = { ...input, ...(via ? { server: via } : {}) }
+    const { path } = via ? await forward(via, 'walkthrough.write', file) : await writeWalkthroughFile(file)
+    await orca.host.call('editor.open', { workspaceId, path })
+    return { path }
   })
 
   handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {

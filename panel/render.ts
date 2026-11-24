@@ -122,6 +122,7 @@ const ICONS: Record<string, { body: string; solid?: boolean }> = {
   play: { body: '<path d="M7 4.5v15l12-7.5z"/>', solid: true },
   stop: { body: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>', solid: true },
   refresh: { body: '<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4h-4"/>' },
+  open: { body: '<path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>' },
   copy: { body: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>' },
   settings: {
     body: '<path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1.5 14h5"/><path d="M9.5 8h5"/><path d="M17.5 16h5"/>',
