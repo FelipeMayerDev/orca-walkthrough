@@ -6,8 +6,15 @@ A port of [herdr-walkthrough](https://github.com/dmazlum/herdr-walkthrough) as a
 [Orca](https://github.com/stablyai/orca) plugin: **read a diff in the order it makes
 sense.** Instead of listing files alphabetically, an agent — Claude, Codex, OpenCode,
 or whichever Orca runs — groups the diff's hunks into steps, orders them so each
-builds on the last, and explains each one with its code alongside. It explains; it
-does not judge.
+builds on the last, and explains each one with its code alongside. The explanation
+describes and never judges; an optional **Review** beside it scores the complexity
+and names the risks, each resting on the code it points at.
+
+**New in 0.2** — the panel becomes a reader with every step as a card, an optional
+Review (complexity, areas, risks, contracts), a full-width tab, asking an agent or
+starting a new session from a step, and paired Orca servers.
+
+[![Walkthrough 0.2 release video](https://raw.githubusercontent.com/FelipeMayerDev/orca-walkthrough/media/walkthrough-0.2.0.png)](https://github.com/FelipeMayerDev/orca-walkthrough/blob/media/walkthrough-0.2.0.mp4)
 
 ![Walkthrough demo](https://raw.githubusercontent.com/FelipeMayerDev/orca-walkthrough/media/demo.gif)
 
@@ -27,7 +34,8 @@ that is logged in (Claude Code, Codex, OpenCode, Oh My Pi, ZCode or Hermes). Pul
 requests are read with the GitHub CLI, `gh`.
 
 **What it can see and send.** The plugin runs a trusted worker with your user
-account's access and requests `workspace:read`, `agent:read` and `settings:own`. It
+account's access and requests `workspace:read`, `agent:read`, `settings:own`, and
+`agent:launch` with `terminal:send` (only used when you send a step to an agent). It
 reads the repository's diff and, for task matching, Claude Code's local transcripts.
 When — and only when — you press **Generate**, the diff is sent to the agent you
 picked, and through it to that agent's model provider. It keeps no telemetry of its
@@ -35,10 +43,11 @@ own.
 
 Open the **Walkthrough** panel in Orca's right sidebar, pick what to read —
 uncommitted work, the staged part, the branch, one commit, a pull request, or the
-last turn of an agent — and press **Generate**. The walkthrough reads as one
-document: every part with its steps in order, the code beside the words, what no
-step covers at the end. Walk it with `j`/`k`, mark steps read with `x`, show
-only the unread with `u`, see how it matches the task with `t`, go back with `Esc`.
+last turn of an agent — and press **Generate**. The panel becomes the reader: an
+overview (summary, task, review, where the lines went, every step as a card), then
+one step at a time with its code and your place kept. The open icon shows the same
+reader full width in an editor tab, with a rail of every step. Walk it with
+`j`/`k`, mark steps read with `x`, go back to the overview with `Esc`.
 
 ## What it does
 
@@ -60,6 +69,19 @@ only the unread with `u`, see how it matches the task with `t`, go back with `Es
   own words. Each request is marked ✓ carried out, ◐ partly, ○ not in this diff.
 - **Staleness** — steps are tied to exact code; when an agent keeps editing, steps mark
   themselves **outdated**. Read marks (`x`) persist across sessions, per repository.
+- **Review** (optional, on by default) — a complexity score from 1 to 10 by halves
+  with its reason, the areas the change reaches, its risks (high, medium, low) and
+  the contracts it changes (API, data, config, dependencies, flags). Every item
+  names the hunks it rests on and is dropped when it names none; risky steps carry
+  a ⚑. The overview also says which steps change tests.
+- **Ask an agent about a step** — from a step in the tab, send a question or an
+  instruction to an agent already running in the workspace, start a new one, or
+  start a **New session**: a child worktree off the current branch (through
+  `orca worktree create`) with an agent given the step, its explanation and where
+  its code is.
+- **Paired Orca servers** — when the workspace lives on a paired server, the panel
+  forwards its requests to the plugin there (loaded for development), so git and
+  the agents run where the code is.
 - **Sharing** — **Copy** puts the whole walkthrough on the clipboard as Markdown,
   bounded by `<!-- walkthrough -->` comments so it can be pasted into a PR description
   and later told apart from the task.
@@ -85,7 +107,7 @@ reads but never out of what you see. Task matching reads Claude Code's transcrip
 so a walkthrough made by another agent explains without matching.
 
 - Results are cached by everything that decides them (the code, model, language,
-  preferences, task) — putting the working tree back the way it was brings the earlier
+  preferences, task, review on or off) — putting the working tree back the way it was brings the earlier
   walkthrough back free.
 - A run goes on in the background even with the panel closed; the next look finds the
   answer. A watchdog stops a hung run.
@@ -94,7 +116,9 @@ so a walkthrough made by another agent explains without matching.
 - Nothing is sent to the model until you press Generate.
 
 Data lives under `~/.local/share/orca/walkthrough/` (entries, pointers, jobs, read
-marks, turns).
+marks, turns). Opening a walkthrough in a tab writes a small
+`.walkthrough/<scope>.walkthrough.json` naming it in the workspace, kept out of git
+through `.git/info/exclude`.
 
 ## Turns
 
@@ -124,6 +148,9 @@ In Orca's Settings → Plugins → Walkthrough, and behind the ⚙ in the panel:
   Sonnet or Opus.
 - **Language** — the language the walkthrough is written in (prose only; code
   identifiers stay as they are).
+- **Review** — add the review (complexity, areas, risks, contracts) to every
+  walkthrough. Off, the walkthrough only orders and explains, asked for exactly as
+  before.
 - **Preferences** — your own wishes for every walkthrough, added to every prompt.
 
 ## Development
