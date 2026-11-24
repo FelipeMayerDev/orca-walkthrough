@@ -99,6 +99,15 @@ export type AskOut = { id: string; text: string; coverage: string; steps: number
 
 export type UncoveredOut = { path: string; status: string; generated: boolean; binary: boolean; note: string; unread?: string; hunks: HunkRef[] }
 
+/** The review, where each item points: the steps whose hunks it names (empty when they now show only under Not covered). */
+export type ReviewOut = {
+  complexity: number
+  why: string
+  areas: { name: string; steps: number[] }[]
+  risks: { severity: string; text: string; steps: number[] }[]
+  contracts: { kind: string; text: string; steps: number[] }[]
+}
+
 export type ViewAnswer = {
   diff: DiffAnswer
   /** The key the walkthrough of this diff would have, in this model and language. */
@@ -113,6 +122,8 @@ export type ViewAnswer = {
   /** The task found now (auto mode), for the exact key. */
   taskNow: Task | null
   asks: { list: AskOut[]; met: number; total: number; outside: number[] } | null
+  /** Null when the walkthrough was written without the review. */
+  review: ReviewOut | null
   job: { running: boolean; startedAt: number; deadline: number; agent: string; model: string } | null
 }
 

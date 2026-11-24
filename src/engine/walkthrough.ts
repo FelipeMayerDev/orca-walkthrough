@@ -16,6 +16,10 @@ export const WEIGHTS = ['key', 'normal', 'skim'] as const
 export const NOTE_KINDS = ['choice', 'upkeep', 'gap', 'divergence', 'untested'] as const
 // How much of a request in the task the diff carries out: all of it, part of it, or none of it that can be seen here.
 export const COVERAGE = ['seen', 'partly', 'absent'] as const
+// The review, asked for only when the reader turns it on: kept apart from the explanation.
+export const SEVERITIES = ['high', 'medium', 'low'] as const
+export const CONTRACT_KINDS = ['api', 'data', 'config', 'dependency', 'flag'] as const
+export const REVIEW_LIMITS = { areas: 6, areaName: 40, risks: 6, contracts: 8, text: 240, why: 200 }
 
 export type Weight = (typeof WEIGHTS)[number]
 export type NoteKind = (typeof NOTE_KINDS)[number]
@@ -26,6 +30,16 @@ export type Step = { id: string; title: string; weight: Weight; text: string; no
 export type Part = { title: string; blurb: string; steps: Step[] }
 export type Skipped = { path: string; note: string }
 export type Ask = { id: string; text: string; coverage: Coverage; hunkIds: string[] }
+export type Severity = (typeof SEVERITIES)[number]
+export type ContractKind = (typeof CONTRACT_KINDS)[number]
+/** How hard the change is to take in (1–10 by halves), where it reaches, what could go wrong and which contracts move — each resting on hunks. */
+export type Review = {
+  complexity: number
+  why: string
+  areas: { name: string; hunkIds: string[] }[]
+  risks: { severity: Severity; text: string; hunkIds: string[] }[]
+  contracts: { kind: ContractKind; text: string; hunkIds: string[] }[]
+}
 
 /** What the model returns, made safe: the walkthrough as it is stored. */
 export type Walkthrough = {
@@ -35,6 +49,8 @@ export type Walkthrough = {
   skipped: Skipped[]
   dropped: number
   asks: Ask[] | null
+  /** Absent on walkthroughs written without the review. */
+  review?: Review | null
 }
 
 /** A step over the diff as it is now: the hunks it still finds, and where. */
@@ -103,14 +119,31 @@ export const SCHEMA: Record<string, unknown> = {
   },
 }
 
-/** The shape asked for: with a task, the requests it makes and the hunks that carry each out. */
-export function schemaFor(withTask: boolean): Record<string, unknown> {
-  if (!withTask) return SCHEMA
+const hunks = { type: 'array', items: str }
+const REVIEW_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['complexity', 'why', 'areas', 'risks', 'contracts'],
+  properties: {
+    complexity: { type: 'number' },
+    why: str,
+    areas: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'hunks'], properties: { name: str, hunks } } },
+    risks: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['severity', 'text', 'hunks'], properties: { severity: { type: 'string', enum: SEVERITIES }, text: str, hunks } } },
+    contracts: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['kind', 'text', 'hunks'], properties: { kind: { type: 'string', enum: CONTRACT_KINDS }, text: str, hunks } } },
+  },
+}
+
+/** The shape asked for: with a task, the requests it makes and the hunks that carry each out; with the review, that too. */
+export function schemaFor(withTask: boolean, withReview = false): Record<string, unknown> {
+  const base = withReview
+    ? { ...SCHEMA, required: [...(SCHEMA.required as string[]), 'review'], properties: { ...SCHEMA.properties as Record<string, unknown>, review: REVIEW_SCHEMA } }
+    : SCHEMA
+  if (!withTask) return base
   return {
-    ...SCHEMA,
-    required: [...(SCHEMA.required as string[]), 'asks'],
+    ...base,
+    required: [...(base.required as string[]), 'asks'],
     properties: {
-      ...SCHEMA.properties as Record<string, unknown>,
+      ...base.properties as Record<string, unknown>,
       asks: {
         type: 'array',
         items: {
@@ -143,7 +176,7 @@ const idOf = (idByAlias: Record<string, string>, alias: unknown): string | undef
  * @param digestFiles from the digest, to place skipped notes
  * @param options asks: a task was given, so its requests are read (else `asks` is null)
  */
-export function normalize(raw: any, idByAlias: Record<string, string>, digestFiles: { path: string; aliases: string[] }[] = [], { asks: withTask = false }: { asks?: boolean } = {}): Walkthrough {
+export function normalize(raw: any, idByAlias: Record<string, string>, digestFiles: { path: string; aliases: string[] }[] = [], { asks: withTask = false, review: withReview = false }: { asks?: boolean; review?: boolean } = {}): Walkthrough {
   if (!raw || typeof raw !== 'object') throw fail('The model returned no walkthrough.')
   const used = new Set<string>()
   let steps = 0, notes = 0, dropped = 0
@@ -204,7 +237,53 @@ export function normalize(raw: any, idByAlias: Record<string, string>, digestFil
   }
 
   const asks = withTask ? normalizeAsks(raw.asks, idByAlias) : null
-  return { title: text(raw.title, 140) || 'Walkthrough', summary: text(raw.summary), parts, skipped, dropped, asks }
+  const out: Walkthrough = { title: text(raw.title, 140) || 'Walkthrough', summary: text(raw.summary), parts, skipped, dropped, asks }
+  if (withReview) out.review = normalizeReview(raw.review, idByAlias)
+  return out
+}
+
+/**
+ * The review made safe. The score is clamped to 1–10 and rounded to a half;
+ * an area, risk or contract that points at no hunk of the digest is dropped,
+ * so nothing is claimed about code the model was not shown.
+ */
+export function normalizeReview(raw: any, idByAlias: Record<string, string>): Review | null {
+  if (!raw || typeof raw !== 'object') return null
+  const ids = (list: unknown): string[] => {
+    const out: string[] = []
+    for (const alias of Array.isArray(list) ? list : []) {
+      const id = idOf(idByAlias, alias)
+      if (id && !out.includes(id)) out.push(id)
+    }
+    return out
+  }
+  const score = Number(raw.complexity)
+  const complexity = Number.isFinite(score) ? Math.min(10, Math.max(1, Math.round(score * 2) / 2)) : 0
+  const list = <T>(items: unknown, max: number, make: (item: any) => T | null): T[] => {
+    const out: T[] = []
+    for (const item of Array.isArray(items) ? items : []) {
+      if (out.length >= max) break
+      const made = item && typeof item === 'object' ? make(item) : null
+      if (made) out.push(made)
+    }
+    return out
+  }
+  const areas = list(raw.areas, REVIEW_LIMITS.areas, (a) => {
+    const name = text(a.name, REVIEW_LIMITS.areaName), hunkIds = ids(a.hunks)
+    return name && hunkIds.length ? { name, hunkIds } : null
+  })
+  const risks = list(raw.risks, REVIEW_LIMITS.risks, (r) => {
+    const body = text(r.text, REVIEW_LIMITS.text), hunkIds = ids(r.hunks)
+    return body && hunkIds.length ? { severity: SEVERITIES.includes(r.severity) ? r.severity as Severity : 'medium', text: body, hunkIds } : null
+  })
+  const contracts = list(raw.contracts, REVIEW_LIMITS.contracts, (c) => {
+    const body = text(c.text, REVIEW_LIMITS.text), hunkIds = ids(c.hunks)
+    return body && hunkIds.length && CONTRACT_KINDS.includes(c.kind) ? { kind: c.kind as ContractKind, text: body, hunkIds } : null
+  })
+  if (!complexity && !areas.length && !risks.length && !contracts.length) return null
+  // High risks first: the list is read top down.
+  risks.sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity))
+  return { complexity: complexity || 1, why: text(raw.why, REVIEW_LIMITS.why), areas, risks, contracts }
 }
 
 /**

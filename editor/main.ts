@@ -66,6 +66,17 @@ const resumeAt = (): number | null => {
   if (kept !== null && stepAt(kept)) return kept
   return firstUnread()?.position ?? null
 }
+/** The worst risk the review ties to a step, for its marker. */
+const riskOf = (position: number): string | null => {
+  const sev = view?.review?.risks.filter((r) => r.steps.includes(position)).map((r) => r.severity) ?? []
+  return sev.includes('high') ? 'high' : sev.includes('medium') ? 'medium' : sev.length ? 'low' : null
+}
+const isTestPath = (path: string): boolean => /(^|\/)(tests?|__tests__|spec)\/|[._-](test|spec)\.[a-z0-9]+$|_test\.go$/i.test(path)
+const CONTRACT_LABEL: Record<string, string> = { api: 'API', data: 'Data', config: 'Config', dependency: 'Dependency', flag: 'Flag' }
+/** "Step 4 →" links, one per step an item points at. */
+const stepLinks = (positions: number[]): HTMLElement | null => positions.length
+  ? el('span', { class: 'step-links' }, ...positions.map((p) => el('button', { class: 'link', text: `Step ${p} →`, onclick: () => go({ kind: 'step', position: p }) })))
+  : null
 const linesOf = (s: StepOut): number => s.hunks.reduce((n, h) => n + h.added + h.deleted, 0)
 
 // ── loading ───────────────────────────────────────────────────────────────
@@ -137,11 +148,12 @@ function draw(): void {
 
 function drawRail(): void {
   const v = view!
-  const item = (label: string, target: Page, opts: { mark?: string; markClass?: string; current?: boolean; title?: string } = {}) =>
+  const item = (label: string, target: Page, opts: { mark?: string; markClass?: string; current?: boolean; title?: string; flag?: string | null } = {}) =>
     el('button', {
       class: `rail-item${opts.current ? ' current' : ''}`, title: opts.title ?? label,
       'aria-current': opts.current ? 'step' : null, onclick: () => go(target),
-    }, el('span', { class: `mark ${opts.markClass ?? ''}`, text: opts.mark ?? '' }), el('span', { class: 'label', text: label }))
+    }, el('span', { class: `mark ${opts.markClass ?? ''}`, text: opts.mark ?? '' }), el('span', { class: 'label', text: label }),
+      opts.flag ? el('span', { class: `flag ${opts.flag}`, text: '⚑', 'aria-label': `${opts.flag} risk` }) : null)
 
   const items: HTMLElement[] = [item('Overview', { kind: 'overview' }, { mark: '◇', current: page.kind === 'overview' })]
   for (const part of v.parts) {
@@ -153,7 +165,8 @@ function drawRail(): void {
         current,
         mark: s.read ? '✓' : current ? '●' : String(s.position),
         markClass: s.read ? 'read' : s.outdated ? 'stale' : '',
-        title: `${s.position}. ${s.title}${s.outdated ? ' (outdated)' : ''}`,
+        title: `${s.position}. ${s.title}${s.outdated ? ' (outdated)' : ''}${riskOf(s.position) ? ` · ${riskOf(s.position)} risk` : ''}`,
+        flag: riskOf(s.position),
       }))
     }
   }
@@ -223,6 +236,16 @@ function drawOverview(): void {
     fact('Task', el('b', { text: `${v.task.label}. ` }), short(v.task.text, 320),
       v.asks ? el('button', { class: 'link', text: ` ${v.asks.met} of ${v.asks.total} requests carried out →`, onclick: () => go({ kind: 'task' }) }) : null)
   }
+  // Tests: which steps change test files, and which say their main promise goes untested.
+  const tested = all.filter((s) => s.hunks.some((h) => isTestPath(h.path)))
+  const untested = all.filter((s) => s.notes.some((n) => n.kind === 'untested'))
+  const looseTests = v.uncovered.filter((u) => isTestPath(u.path)).length
+  if (all.length) {
+    fact('Tests',
+      tested.length ? `Test files change in ${plural(tested.length, 'step')} of ${all.length}. ` : 'No step changes a test file. ',
+      looseTests ? el('button', { class: 'link', text: `${plural(looseTests, 'test file')} under Not covered.`, onclick: () => go({ kind: 'uncovered' }) }) : null,
+      untested.length ? el('span', {}, ' Untested promise in ', ...untested.flatMap((s, i) => [i ? ', ' : '', el('button', { class: 'link', text: `step ${s.position}`, onclick: () => go({ kind: 'step', position: s.position }) })]), '.') : null)
+  }
   if (v.outdated) fact('Changed since', `${plural(v.outdated, 'step')} no longer match the code: they are marked in the list.`)
 
   // Where the lines went, by part.
@@ -247,6 +270,7 @@ function drawOverview(): void {
       el('span', { class: 'd', text: d ? `−${d}` : '' })))
   })
   const changes = el('section', { class: 'changes' },
+    reviewBlock(),
     el('h2', {}, 'Changes ', el('span', { class: 'dim', text: plural(v.diff.fileCount, 'file') })),
     el('div', { class: 'totals' }, el('span', { class: 'a', text: `+${added}` }), el('span', { class: 'd', text: `−${deleted}` })),
     shares, rows)
@@ -263,7 +287,8 @@ function drawOverview(): void {
       el('span', { class: 'foot' },
         s.hunks.length ? el('span', { class: 'dim', text: plural(filesOf(s.hunks).length, 'file') }) : null,
         s.weight === 'key' ? el('span', { class: 'badge key', text: 'Key' }) : s.weight === 'skim' ? el('span', { class: 'badge', text: 'Context' }) : null,
-        s.outdated ? el('span', { class: 'badge warn', text: 'Outdated' }) : null)))
+        s.outdated ? el('span', { class: 'badge warn', text: 'Outdated' }) : null,
+        riskOf(s.position) ? el('span', { class: `badge risk ${riskOf(s.position)}`, text: `⚑ ${riskOf(s.position)}` }) : null)))
   }
   const tour = el('section', { class: 'tour' },
     el('h2', {}, 'Steps ', el('span', { class: 'dim', text: `${all.length} · ${all.filter((s) => s.read).length} read` })),
@@ -271,6 +296,31 @@ function drawOverview(): void {
     v.uncovered.length ? el('button', { class: 'link', text: `${plural(v.uncovered.length, 'file')} with edits no step explains →`, onclick: () => go({ kind: 'uncovered' }) }) : null)
 
   pageEl.replaceChildren(el('div', { class: 'overview' }, head, el('div', { class: 'ov-cols' }, facts, changes), tour))
+}
+
+/** The review: the score with its reason, then risks, contracts and areas, each pointing at its steps. */
+function reviewBlock(): HTMLElement | null {
+  const r = view!.review
+  if (!r) return null
+  const level = r.complexity >= 7.5 ? 'high' : r.complexity >= 4.5 ? 'medium' : 'low'
+  const box = el('div', { class: `review ${level}` },
+    el('div', { class: 'score-row' },
+      el('span', { class: 'score' }, el('b', { text: r.complexity.toFixed(1) }), el('span', { class: 'dim', text: '/10' })),
+      el('span', { class: 'score-label', text: 'Complexity' })),
+    r.why ? el('p', { class: 'why', text: r.why }) : null)
+  if (r.areas.length) {
+    box.append(el('div', { class: 'areas' }, ...r.areas.map((a) =>
+      el('button', { class: 'area', title: a.steps.length ? `Steps ${a.steps.join(', ')}` : 'Only under Not covered', onclick: () => a.steps[0] && go({ kind: 'step', position: a.steps[0] }) }, a.name))))
+  }
+  if (r.risks.length) {
+    box.append(el('h3', {}, 'Risks ', el('span', { class: 'dim', text: String(r.risks.length) })))
+    for (const k of r.risks) box.append(el('div', { class: 'item' }, el('span', { class: `sev ${k.severity}`, text: k.severity }), el('span', { class: 'text', text: k.text }), stepLinks(k.steps)))
+  } else box.append(el('p', { class: 'dim none', text: 'No risks named.' }))
+  if (r.contracts.length) {
+    box.append(el('h3', {}, 'Contracts changed ', el('span', { class: 'dim', text: String(r.contracts.length) })))
+    for (const c of r.contracts) box.append(el('div', { class: 'item' }, el('span', { class: 'kind', text: CONTRACT_LABEL[c.kind] ?? c.kind }), el('span', { class: 'text', text: c.text }), stepLinks(c.steps)))
+  }
+  return box
 }
 
 // ── one step ──────────────────────────────────────────────────────────────
@@ -287,6 +337,12 @@ function drawStep(s: StepOut): void {
     el('h1', { text: s.title }))
 
   const notes = s.notes.map((n) => el('div', { class: `callout ${n.kind}` }, el('b', { text: `${n.kind}: ` }), n.text))
+  for (const k of view!.review?.risks.filter((r) => r.steps.includes(s.position)) ?? []) {
+    notes.unshift(el('div', { class: `callout risk ${k.severity}` }, el('b', { text: `${k.severity} risk: ` }), k.text))
+  }
+  for (const c of view!.review?.contracts.filter((r) => r.steps.includes(s.position)) ?? []) {
+    notes.push(el('div', { class: 'callout contract' }, el('b', { text: `${CONTRACT_LABEL[c.kind] ?? c.kind} contract: ` }), c.text))
+  }
   if (s.outdated) notes.push(el('div', { class: 'callout gap' }, el('b', { text: 'outdated: ' }), `${s.missing} of the ${plural(s.hunks.length + s.missing, 'hunk')} this step described changed or are gone.`))
 
   const asks = view!.asks?.list.filter((a) => a.steps.includes(s.position)) ?? []

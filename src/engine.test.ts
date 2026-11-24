@@ -12,7 +12,8 @@ import { displayEnv } from './engine/clipboard'
 import { cacheKey } from './engine/cache'
 import type { DigestFile } from './engine/digest'
 import { buildDigest } from './engine/digest'
-import { normalize, overlay, overlayAsks, parseJson, LIMITS, fileTotals } from './engine/walkthrough'
+import { normalize, normalizeReview, schemaFor, overlay, overlayAsks, parseJson, LIMITS, fileTotals } from './engine/walkthrough'
+import { buildPrompt } from './engine/prompt'
 import { parseTranscript, isNoise, cleanCommitMessage, resolveTask, joinMessages, MAX_TASK_CHARS } from './engine/task'
 import { readKey, markStep, unmarkStep, mergeRead, changedSince } from './engine/read'
 import { isGenerated } from './engine/generated'
@@ -657,4 +658,29 @@ test('matchFocused: the id tells apart one repository listed on two hosts', () =
 test('matchFocused: a client-prefixed id still finds the workspace by its uuid', () => {
   const w = { id: 'identity:wt2:local:u1', name: 'a', path: '/a', branch: null }
   assert.equal(matchFocused({ workspaceId: 'identity:wt2:runtime:srv:u1', branch: '', displayName: 'x' }, [w]), w)
+})
+
+test('normalizeReview: score by halves within 1–10, nothing kept without real hunks', () => {
+  const ids = { h1: 'a:1', h2: 'a:2' }
+  const r = normalizeReview({
+    complexity: 6.74, why: ' Touches two builders ',
+    areas: [{ name: 'Stock', hunks: ['h1', 'h1', 'h9'] }, { name: 'Ghost', hunks: ['h9'] }],
+    risks: [{ severity: 'low', text: 'minor', hunks: ['h2'] }, { severity: 'high', text: 'loses orders', hunks: ['[h1]'] }, { severity: 'high', text: 'invented', hunks: [] }],
+    contracts: [{ kind: 'data', text: 'new column', hunks: ['h2'] }, { kind: 'vibes', text: 'x', hunks: ['h1'] }],
+  }, ids)!
+  assert.equal(r.complexity, 6.5)
+  assert.equal(r.why, 'Touches two builders')
+  assert.deepEqual(r.areas, [{ name: 'Stock', hunkIds: ['a:1'] }])
+  assert.deepEqual(r.risks.map((x) => x.text), ['loses orders', 'minor'])
+  assert.deepEqual(r.contracts.map((x) => x.kind), ['data'])
+  assert.equal(normalizeReview({ complexity: 42 }, ids)!.complexity, 10)
+  assert.equal(normalizeReview(null, ids), null)
+})
+
+test('review: asked for only when on, so a walkthrough without it keeps its prompt and schema', () => {
+  const input = { digest: '', fileCount: 1, hunkCount: 1, what: 'x' }
+  assert.equal(buildPrompt(input).system, buildPrompt({ ...input, review: false }).system)
+  assert.ok(buildPrompt({ ...input, review: true }).system.includes('"review"'))
+  assert.ok(!('review' in (schemaFor(false).properties as object)))
+  assert.ok((schemaFor(true, true).required as string[]).includes('review'))
 })

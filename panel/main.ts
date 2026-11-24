@@ -503,6 +503,11 @@ function renderWalk(): void {
       el('h2', { text: shown.title }),
       shown.summary ? el('p', { class: 'summary', text: shown.summary }) : null,
       metaChips(shown.meta, shown.exact),
+      v.review ? el('div', { class: 'chips' },
+        el('span', { class: `chip score ${v.review.complexity >= 7.5 ? 'high' : v.review.complexity >= 4.5 ? 'medium' : 'low'}`, title: v.review.why }, `Complexity ${v.review.complexity.toFixed(1)}/10`),
+        v.review.risks.length ? el('span', { class: `chip${v.review.risks.some((r) => r.severity === 'high') ? ' bad' : ' warn'}`, title: v.review.risks.map((r) => `${r.severity}: ${r.text}`).join('\n') }, `${v.review.risks.length} risk${v.review.risks.length === 1 ? '' : 's'}`) : null,
+        v.review.contracts.length ? el('span', { class: 'chip', title: v.review.contracts.map((c) => c.text).join('\n') }, `${v.review.contracts.length} contract${v.review.contracts.length === 1 ? '' : 's'} changed`) : null,
+        ...v.review.areas.slice(0, 4).map((a) => el('span', { class: 'chip plain', text: a.name }))) : null,
       el('button', { class: 'open-tab', onclick: () => void openTab() }, icon('open', 13), 'Read it in a tab, step by step')))
 
   // The task, and the unread filter, as chips beside the title.

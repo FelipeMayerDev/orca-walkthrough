@@ -17,7 +17,7 @@ import {
 } from './engine/sources'
 import type { Task } from './engine/task'
 import { stepTurn, turnId, turnKey, type TurnEvent, type TurnStates } from './engine/turns'
-import { overlay, overlayAsks } from './engine/walkthrough'
+import { overlay, overlayAsks, type Overlay, type Review } from './engine/walkthrough'
 import { indexHunks } from './engine/hunks'
 import { estimateTokens, MAX_PROMPT_CHARS } from './engine/cache'
 import { isRead } from './engine/read'
@@ -29,7 +29,7 @@ import { DEFAULT_LANGUAGE } from './engine/languages'
 import { toMarkdown } from './engine/export'
 import type {
   AskOut, DiffAnswer, FileSummary, GenerateAnswer, PollAnswer, ScopesAnswer, StateAnswer,
-  StepOut, TurnSummary, ViewAnswer, EntryMeta, HunkRef, HunkLines, UncoveredOut,
+  StepOut, TurnSummary, ViewAnswer, EntryMeta, HunkRef, HunkLines, UncoveredOut, ReviewOut,
 } from './protocol'
 
 const invalid = (message: string): Error => Object.assign(new Error(message), { code: 'invalid_params' })
@@ -92,7 +92,7 @@ function zcodeModelsList(): { key: string; label: string; isDefault: boolean }[]
   return zcodeChecked
 }
 
-async function settings(orca: OrcaWorkerApi): Promise<{ agent: string; model: string; language: string; preferences: string }> {
+async function settings(orca: OrcaWorkerApi): Promise<{ agent: string; model: string; language: string; preferences: string; review: boolean }> {
   const all = await orca.settings.get().catch(() => ({}) as Record<string, unknown>)
   const agent = agentOf(typeof all.agent === 'string' ? all.agent : DEFAULT_AGENT)
   return {
@@ -101,6 +101,7 @@ async function settings(orca: OrcaWorkerApi): Promise<{ agent: string; model: st
     model: modelOf(agent.key, typeof all.model === 'string' ? all.model : agent.defaultModel).key,
     language: typeof all.language === 'string' ? all.language : DEFAULT_LANGUAGE,
     preferences: typeof all.preferences === 'string' ? all.preferences : '',
+    review: all.review !== false,
   }
 }
 
@@ -153,6 +154,20 @@ function diffAnswer(diff: store.Diff): DiffAnswer {
   })
   const tokens = estimateTokens(diff.text.length)
   return { sk: diff.sk, what: diff.what, fileCount: diff.fileCount, hunkCount: diff.hunkCount, tokens, tooBig: tokens * 3.6 > MAX_PROMPT_CHARS, files }
+}
+
+/** The review over the diff as it is now: each item with the steps whose hunks it names. */
+function reviewOut(review: Review | null | undefined, view: Overlay): ReviewOut | null {
+  if (!review) return null
+  const stepOf = new Map<string, number>()
+  for (const s of view.steps) for (const f of s.found) stepOf.set(f.hunk.id, s.position)
+  const steps = (ids: string[]): number[] => [...new Set(ids.map((id) => stepOf.get(id)).filter((p): p is number => p !== undefined))].sort((a, b) => a - b)
+  return {
+    complexity: review.complexity, why: review.why,
+    areas: review.areas.map((a) => ({ name: a.name, steps: steps(a.hunkIds) })),
+    risks: review.risks.map((r) => ({ severity: r.severity, text: r.text, steps: steps(r.hunkIds) })),
+    contracts: review.contracts.map((c) => ({ kind: c.kind, text: c.text, steps: steps(c.hunkIds) })),
+  }
 }
 
 const hunkRef = (id: string, header: string, added: number, deleted: number, path: string, status: string, scope: string): HunkRef =>
@@ -445,13 +460,13 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   handle('walkthrough.view', async ({ top, source, agent, model, language }): Promise<ViewAnswer> => {
     const repo = await repoOf(top)
-    const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
+    const { agent: defAgent, model: defModel, language: defLanguage, preferences, review } = await settings(orca)
     const chosenAgent = agentOf(agent ?? defAgent)
     const chosenModel = chooseModel(chosenAgent, model ?? defModel)
     const chosenLanguage = language ?? defLanguage
     const diff = await store.readDiff(repo, source)
     const taskNow = await taskFor(repo.top, source)
-    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, taskNow)
+    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, taskNow, review)
     const shown = await store.findShown(repo, diff, key)
 
     const job = await store.jobOf(repo, diff.sk)
@@ -461,7 +476,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!shown) {
       return {
         diff: diffAnswer(diff), key, shown: null, parts: [], uncovered: [], outdated: 0,
-        task: null, taskNow, asks: null,
+        task: null, taskNow, asks: null, review: null,
         job: jobOut,
       }
     }
@@ -496,7 +511,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       shown: { meta, title: entry.walkthrough.title, summary: entry.walkthrough.summary, exact },
       parts, uncovered, outdated: view.outdated,
       task: entry.task ? { ...entry.task, changed: taskKey(entry.task) !== taskKey(taskNow) } : null,
-      taskNow, asks,
+      taskNow, asks, review: reviewOut(entry.walkthrough.review, view),
       job: jobOut,
     }
   })
@@ -517,7 +532,7 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   handle('walkthrough.generate', async ({ top, source, agent, model, language, taskMode, taskText }): Promise<GenerateAnswer> => {
     const repo = await repoOf(top)
-    const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
+    const { agent: defAgent, model: defModel, language: defLanguage, preferences, review } = await settings(orca)
     const chosenAgent = agentOf(agent ?? defAgent)
     const chosenModel = chooseModel(chosenAgent, model ?? defModel)
     const chosenLanguage = language ?? defLanguage
@@ -531,14 +546,14 @@ export default function activate(orca: OrcaWorkerApi): void {
     const prompt = store.preparePrompt(diff, {
       language: chosenLanguage,
       previous: (await store.previousEntry(repo, diff))?.walkthrough ?? null,
-      preferences, task,
+      preferences, task, review,
     })
-    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, task)
+    const key = store.keyFor(repo, diff, chosenAgent.key, chosenModel, chosenLanguage, preferences, task, review)
     if (!store.fits(prompt)) return { cached: false, key, tooBig: true, promptChars: store.promptChars(prompt) }
     if (await store.hasEntry(key)) return { cached: true, key }
     const previous = await store.previousEntry(repo, diff)
     const before = previous ? previous.walkthrough.parts.flatMap((p) => p.steps.flatMap((s) => s.hunkIds)) : []
-    await store.startJob(repo, diff, { key, agent: chosenAgent.key, model: chosenModel, language: chosenLanguage, prompt, source, task, before })
+    await store.startJob(repo, diff, { key, agent: chosenAgent.key, model: chosenModel, language: chosenLanguage, prompt, source, task, before, review })
     orca.panels.post('walkthrough.job', { top, sk: diff.sk, done: false })
     return { cached: false, key, promptChars: store.promptChars(prompt) }
   })

@@ -20,8 +20,9 @@ export const codeKey = (files: DigestFile[]): string => longHash(JSON.stringify(
 
 /** `task`: taskKey, "" for none, so a walkthrough without a task keeps the key it always had.
  *  `agent`: kept out when 'claude', so the walkthroughs already on disk keep their names. */
-export function cacheKey({ top, source, agent = 'claude', model, language, preferences = '', files, task = '' }: { top: string; source: string; agent?: string; model: string; language: string; preferences?: string; files: DigestFile[]; task?: string }): string {
-  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, ...(agent && agent !== 'claude' ? [agent] : []), model, language, hash(String(preferences).trim()), codeKey(files), ...(task ? [task] : [])]))
+/*  `review`: kept out when off, for the same reason. */
+export function cacheKey({ top, source, agent = 'claude', model, language, preferences = '', files, task = '', review = false }: { top: string; source: string; agent?: string; model: string; language: string; preferences?: string; files: DigestFile[]; task?: string; review?: boolean }): string {
+  return longHash(JSON.stringify([VERSION, PROMPT_VERSION, top, source, ...(agent && agent !== 'claude' ? [agent] : []), model, language, hash(String(preferences).trim()), codeKey(files), ...(task ? [task] : []), ...(review ? ['review'] : [])]))
 }
 
 /** One pointer (the walkthrough shown last) and one running job per repository and source. */

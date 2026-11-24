@@ -149,6 +149,49 @@ body.tab { display: block; height: 100%; background: var(--orca-background); fon
 .card.here { border-color: var(--orca-primary); box-shadow: 0 0 0 1px var(--orca-primary); opacity: 1; }
 .card.stale .n { color: var(--warn); }
 
+/* The review. */
+.review {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; margin-bottom: 22px;
+  border: 1px solid var(--orca-border); border-left: 3px solid var(--sev, var(--orca-border)); border-radius: 9px; background: var(--orca-card);
+}
+.review.low { --sev: var(--ok); }
+.review.medium { --sev: var(--warn); }
+.review.high { --sev: var(--orca-destructive); }
+.review .score-row { display: flex; align-items: baseline; gap: 10px; }
+.review .score { font-variant-numeric: tabular-nums; }
+.review .score b { font-size: 28px; line-height: 1; font-weight: 700; color: var(--sev); letter-spacing: -0.02em; }
+.review .score .dim { font-size: 14px; margin-left: 1px; }
+.review .score-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--orca-muted-foreground); font-family: var(--mono); }
+.review .why { margin: 0; line-height: 1.55; font-size: 12.5px; }
+.review h3 { margin: 6px 0 0; font-size: 12px; font-weight: 600; }
+.review h3 .dim { font-weight: 400; }
+.review .item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: baseline; font-size: 12.5px; line-height: 1.5; }
+.review .item .step-links { grid-column: 2; display: flex; gap: 10px; flex-wrap: wrap; font-size: 11.5px; }
+.review .none { margin: 0; font-size: 12px; }
+.sev, .review .kind {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid currentColor; white-space: nowrap;
+}
+.sev.high { color: var(--orca-destructive); }
+.sev.medium { color: var(--warn); }
+.sev.low { color: var(--orca-muted-foreground); }
+.review .kind { color: var(--orca-primary); }
+.areas { display: flex; flex-wrap: wrap; gap: 5px; }
+.area {
+  font: inherit; font-size: 11.5px; padding: 2px 9px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--orca-border); background: var(--orca-background); color: var(--orca-foreground);
+}
+.area:hover { border-color: var(--orca-primary); }
+.rail-item .flag { flex: none; margin-left: auto; font-size: 11px; }
+.flag.high, .badge.risk.high { color: var(--orca-destructive); border-color: color-mix(in srgb, var(--orca-destructive) 55%, transparent); }
+.flag.medium, .badge.risk.medium { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.flag.low, .badge.risk.low { color: var(--orca-muted-foreground); }
+.callout.risk.high { border-left-color: var(--orca-destructive); }
+.callout.risk.high b { color: var(--orca-destructive); }
+.callout.risk.medium { border-left-color: var(--warn); }
+.callout.risk.medium b { color: var(--warn); }
+.callout.contract { border-left-color: var(--orca-primary); }
+
 /* One step. */
 .step-page { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 .step-head { display: flex; flex-direction: column; gap: 6px; max-width: var(--measure); }

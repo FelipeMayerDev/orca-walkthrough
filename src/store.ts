@@ -124,8 +124,8 @@ export async function readDiff(repo: Repo, source: Source): Promise<Diff> {
 }
 
 /** The key the walkthrough of this diff would have, by this agent, in this model and language, under these preferences, matched against this task. */
-export const keyFor = (repo: Repo, diff: Diff, agent: string, model: string, language: string, preferences = '', task: Task | null = null): string =>
-  cacheKey({ top: repo.top, source: diff.sk, agent, model, language, preferences, files: diff.files, task: taskCacheKey(task) })
+export const keyFor = (repo: Repo, diff: Diff, agent: string, model: string, language: string, preferences = '', task: Task | null = null, review = false): string =>
+  cacheKey({ top: repo.top, source: diff.sk, agent, model, language, preferences, files: diff.files, task: taskCacheKey(task), review })
 
 /**
  * What people typed into Claude Code sessions working in a repository since
@@ -303,8 +303,8 @@ export async function saveRead(top: string, ids: string[], on: boolean): Promise
   return merged
 }
 
-export const preparePrompt = (diff: Diff, options: { language: string; previous?: Walkthrough | null; preferences?: string; task?: Task | null }): { system: string; prompt: string } =>
-  buildPrompt({ digest: diff.text, fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language: options.language, previous: options.previous ?? null, preferences: options.preferences ?? '', task: options.task ?? null })
+export const preparePrompt = (diff: Diff, options: { language: string; previous?: Walkthrough | null; preferences?: string; task?: Task | null; review?: boolean }): { system: string; prompt: string } =>
+  buildPrompt({ digest: diff.text, fileCount: diff.fileCount, hunkCount: diff.hunkCount, what: diff.what, language: options.language, previous: options.previous ?? null, preferences: options.preferences ?? '', task: options.task ?? null, review: options.review ?? false })
 
 export const promptChars = (p: { system: string; prompt: string }): number => p.system.length + p.prompt.length
 export const fits = (p: { system: string; prompt: string }): boolean => promptChars(p) <= MAX_PROMPT_CHARS
@@ -321,7 +321,7 @@ export async function jobOf(repo: Repo, sk: string): Promise<Job | null> {
 }
 
 /** Starts a generation in the background and returns its job. */
-export async function startJob(repo: Repo, diff: Diff, { key, agent = 'claude', model, language, prompt, source, task = null, before = [] }: { key: string; agent?: string; model: string; language: string; prompt: { system: string; prompt: string }; source: Source; task?: Task | null; before?: string[] }): Promise<Job> {
+export async function startJob(repo: Repo, diff: Diff, { key, agent = 'claude', model, language, prompt, source, task = null, before = [], review = false }: { key: string; agent?: string; model: string; language: string; prompt: { system: string; prompt: string }; source: Source; task?: Task | null; before?: string[]; review?: boolean }): Promise<Job> {
   await ensureDirs()
   const dir = jobDir(placeKey(repo.top, diff.sk))
   // A run still going there (another window started it) is stopped, not orphaned.
@@ -333,10 +333,11 @@ export async function startJob(repo: Repo, diff: Diff, { key, agent = 'claude', 
     idByAlias: diff.idByAlias, digestFiles: diff.digestFiles, hunkCount: diff.hunkCount, before,
     // Kept with the walkthrough: where its task came from, and the key that tells when the task has changed since.
     task: task ? { ...task, key: taskKey(task) } : null,
+    review,
   }
   await writeFile(`${dir}/system.txt`, prompt.system, 'utf8')
   await writeFile(`${dir}/prompt.txt`, prompt.prompt, 'utf8')
-  await writeFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task))), 'utf8')
+  await writeFile(`${dir}/schema.json`, JSON.stringify(schemaFor(Boolean(task), review)), 'utf8')
   await writeFile(`${dir}/run.sh`, jobScript(agent), 'utf8')
   await writeFile(`${dir}/meta.json`, JSON.stringify(meta), 'utf8')
   // Detached: the run outlives the worker, and Orca with it.
@@ -392,7 +393,7 @@ export async function finishJob(job: Job): Promise<Entry | null> {
   try {
     const read = (name: string): Promise<string | null> => readFile(`${claimed}/${name}`, 'utf8').catch(() => null)
     const { raw, cost } = readOutcome(job.meta.agent ?? 'claude', { out: await read('out.json'), err: await read('err.txt'), code: job.code })
-    const walkthrough = normalize(raw, job.meta.idByAlias ?? {}, job.meta.digestFiles ?? [], { asks: Boolean(job.meta.task) })
+    const walkthrough = normalize(raw, job.meta.idByAlias ?? {}, job.meta.digestFiles ?? [], { asks: Boolean(job.meta.task), review: Boolean(job.meta.review) })
     const { key, model, language, top, source, sk } = job.meta
     // `before`: the hunks of the walkthrough shown when this one was asked for, to tell what changed since it was read.
     const entry: Entry = { version: VERSION, key, agent: job.meta.agent ?? 'claude', code: job.meta.code, model, language, top, source, sk, generatedAt: Date.now(), took: Date.now() - (job.meta.startedAt ?? job.meta.started ?? Date.now()), cost, walkthrough, before: job.meta.before ?? [], task: job.meta.task ?? null }

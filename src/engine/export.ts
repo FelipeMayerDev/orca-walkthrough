@@ -20,13 +20,14 @@ const code = (s: string): string => {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
-export function toMarkdown(view: Overlay, walkthrough: Pick<Walkthrough, 'title' | 'summary'>, { what = '', agent = 'claude', model = '', language = '', cost = null }: { what?: string; agent?: string; model?: string; language?: string; cost?: number | null } = {}, task: TaskOverlay | null = null, taskLabel = ''): string {
+export function toMarkdown(view: Overlay, walkthrough: Pick<Walkthrough, 'title' | 'summary' | 'review'>, { what = '', agent = 'claude', model = '', language = '', cost = null }: { what?: string; agent?: string; model?: string; language?: string; cost?: number | null } = {}, task: TaskOverlay | null = null, taskLabel = ''): string {
   // The bounds let a walkthrough pasted into a pull request's description be left out when that description is read as a task.
   const out: string[] = [MARK_START, `## ${line(walkthrough.title) || 'Walkthrough'}`, '']
   if (walkthrough.summary?.trim()) out.push(walkthrough.summary.trim(), '')
   const about = [what && line(what), agent && agent !== 'claude' ? agentOf(agent).name : '', model, language, typeof cost === 'number' ? `$${cost.toFixed(cost < 0.1 ? 3 : 2)}` : ''].filter(Boolean)
   if (about.length) out.push(`<sub>${about.join(' · ')}</sub>`, '')
   if (task) out.push(...taskMarkdown(task, taskLabel))
+  if (walkthrough.review) out.push(...reviewMarkdown(walkthrough.review, view))
 
   for (const part of view.parts) {
     out.push(`### ${line(part.title)}`, '')
@@ -76,5 +77,20 @@ function taskMarkdown(task: TaskOverlay, label: string): string[] {
   }
   out.push('')
   if (task.outside.length) out.push(`Not tied to any request: ${stepList(task.outside)}.`, '')
+  return out
+}
+
+/** The review, as a block under the summary: score and reason, risks, contracts, areas — each with its steps. */
+function reviewMarkdown(review: NonNullable<Walkthrough['review']>, view: Overlay): string[] {
+  const stepOf = new Map<string, number>()
+  for (const s of view.steps) for (const f of s.found) stepOf.set(f.hunk.id, s.position)
+  const where = (ids: string[]): string => {
+    const steps = [...new Set(ids.map((id) => stepOf.get(id)).filter((p): p is number => p !== undefined))].sort((a, b) => a - b)
+    return steps.length ? ` _(step${steps.length === 1 ? '' : 's'} ${steps.join(', ')})_` : ''
+  }
+  const out = ['### Review', '', `**Complexity ${review.complexity.toFixed(1)}/10**${review.why ? ` — ${line(review.why)}` : ''}`, '']
+  if (review.areas.length) out.push(`**Areas:** ${review.areas.map((a) => line(a.name)).join(' · ')}`, '')
+  if (review.risks.length) out.push('**Risks**', '', ...review.risks.map((r) => `- **${r.severity}** ${line(r.text)}${where(r.hunkIds)}`), '')
+  if (review.contracts.length) out.push('**Contracts changed**', '', ...review.contracts.map((c) => `- **${c.kind}** ${line(c.text)}${where(c.hunkIds)}`), '')
   return out
 }

@@ -67,6 +67,13 @@
         "default": "en"
       },
       {
+        "key": "review",
+        "title": "Review",
+        "description": "Add a review to every walkthrough: a complexity score from 1 to 10, the areas it reaches, its risks and the contracts it changes, each pointing at the code it rests on. Off: the walkthrough only orders and explains.",
+        "type": "boolean",
+        "default": true
+      },
+      {
         "key": "preferences",
         "title": "Preferences",
         "description": "Your own wishes for every walkthrough: tone, emphasis, order, what to dwell on or leave out. Added to every prompt.",
