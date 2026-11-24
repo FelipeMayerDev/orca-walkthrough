@@ -138,6 +138,8 @@ declare module 'orca' {
     'walkthrough.agents': { input: { top: string; agent?: string }; output: { running: { terminalId: string; title: string | null; agent: string | null; state: string }[]; launchable: { key: string; name: string }[] } }
     /** Sends `text` to a running agent's terminal, or starts `agent` with it; focuses the terminal. */
     'walkthrough.ask': { input: { top: string; text: string; terminalId?: string; agent?: string }; output: { terminalId: string } }
+    /** A new Orca worktree off this one's branch, with `agent` started on `text`: a session for one step. */
+    'walkthrough.session': { input: { top: string; text: string; agent?: string; name: string }; output: { name: string; path: string } }
     /** What there is to read: branches, commits and pull requests. */
     'walkthrough.scopes': { input: { top: string }; output: ScopesAnswer }
     /** A source's diff as it is now, without hunk contents. */

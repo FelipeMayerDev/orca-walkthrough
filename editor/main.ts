@@ -335,6 +335,7 @@ function askBox(s: StepOut): HTMLElement {
   const question = el('textarea', { class: 'ask-text', rows: '2', placeholder: 'Ask about this step, or tell an agent what to do with it…', 'aria-label': 'Question for the agent' }) as HTMLTextAreaElement
   const target = el('select', { class: 'ask-target', 'aria-label': 'Agent' }) as HTMLSelectElement
   const send = el('button', { class: 'btn primary', text: 'Send' }) as HTMLButtonElement
+  const session = el('button', { class: 'btn', text: 'New session', title: 'A new worktree off this branch, with the agent started on this step' }) as HTMLButtonElement
   const note = el('span', { class: 'dim ask-note', text: 'Sent with the step, its explanation and where its code is.' })
 
   const fill = (a: Agents): void => {
@@ -366,12 +367,32 @@ function askBox(s: StepOut): HTMLElement {
     send.disabled = false
   }
   send.onclick = () => void submit()
+
+  // A session of its own: a child worktree on this branch, its agent given the step.
+  session.onclick = async () => {
+    const q = question.value.trim()
+    if (!q) { question.focus(); note.textContent = 'Say what the new session should do with this step.'; return }
+    const kind = target.value.slice(0, 1)
+    const running = agentsSeen?.running.find((r) => `t:${r.terminalId}` === target.value)
+    const agent = kind === 'n' ? target.value.slice(2) : running?.agent ?? file!.agent
+    const name = `step-${s.position}-${s.title}`.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48)
+    session.disabled = true
+    note.textContent = 'Creating the worktree…'
+    try {
+      const made = await request<{ name: string }>('walkthrough.session', { top: file!.top, text: `${stepContext(s)}\n\n${q}`, agent, name }, 120000)
+      question.value = ''
+      note.textContent = `Started “${made.name}” with the step.`
+    } catch (e) {
+      note.textContent = `Could not create the session: ${message(e)}`
+    }
+    session.disabled = false
+  }
   question.onkeydown = (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit() } }
 
   return el('section', { class: 'ask' },
     el('h2', { text: 'Ask an agent about this step' }),
     question,
-    el('div', { class: 'ask-row-controls' }, target, send, note))
+    el('div', { class: 'ask-row-controls' }, target, send, session, note))
 }
 
 const mark = (a: AskOut): string => (a.coverage === 'seen' ? '✓' : a.coverage === 'partly' ? '◐' : '○')

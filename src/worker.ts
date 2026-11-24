@@ -234,6 +234,17 @@ async function forward(runtime: string, name: string, input: unknown): Promise<a
   return JSON.parse(r.stdout)
 }
 
+/** Runs the Orca CLI with `--json`, on a paired server when `runtime` names one; its `result`, or the error it gave. */
+async function orcaJson(args: string[], runtime?: string): Promise<any> {
+  const cli = await orcaCliPath()
+  if (!cli) throw new Error(`Orca CLI not found (${cliTried})`)
+  const r = await store.exec(cli, [...args, '--json', ...(runtime ? ['--environment', runtime] : [])], { env: cliEnv() })
+  let answer: any
+  try { answer = JSON.parse(r.stdout) } catch { throw new Error((r.stderr || r.stdout).trim() || `orca ${args[0]} failed`) }
+  if (!answer?.ok) throw new Error(answer?.error?.message ?? `orca ${args.slice(0, 2).join(' ')} failed`)
+  return answer.result
+}
+
 // The paired servers this client reaches: Orca lists their workspaces apart,
 // so `workspace.list` here leaves them out and only the CLI names them.
 async function pairedRuntimes(): Promise<string[]> {
@@ -387,6 +398,19 @@ export default function activate(orca: OrcaWorkerApi): void {
     const launched = await orca.host.call('agent.launch', { workspaceId, agent: agentOf(agent ?? DEFAULT_AGENT).orcaKeys[0] ?? 'claude', prompt: text })
     await orca.host.call('terminal.focus', { terminalId: launched.terminalId }).catch(() => undefined)
     return { terminalId: launched.terminalId }
+  })
+
+  // A new session from a step: a child worktree of this one, on its branch, with an agent given the step.
+  orca.panels.handle('walkthrough.session', async ({ top, text, agent, name }) => {
+    const runtime = onServer.get(top)
+    const { worktree } = await orcaJson(['worktree', 'show', '--worktree', `path:${top}`], runtime)
+    const branch = String(worktree?.branch ?? '').replace(/^refs\/heads\//, '')
+    const result = await orcaJson([
+      'worktree', 'create', '--name', name, '--repo', `id:${worktree.repoId}`, '--parent-worktree', `path:${top}`,
+      ...(branch ? ['--base-branch', branch] : []),
+      '--agent', agentOf(agent || DEFAULT_AGENT).orcaKeys[0] ?? 'claude', '--prompt', text, '--activate',
+    ], runtime)
+    return { name: String(result?.worktree?.displayName ?? name), path: String(result?.worktree?.path ?? '') }
   })
 
   handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {
