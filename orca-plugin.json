@@ -89,6 +89,9 @@
       "kind": "workspace:read"
     },
     {
+      "kind": "workspace:write"
+    },
+    {
       "kind": "agent:read"
     },
     {

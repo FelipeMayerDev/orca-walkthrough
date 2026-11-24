@@ -226,8 +226,9 @@ async function writeWalkthroughFile(file: WalkthroughFile): Promise<{ path: stri
   await mkdir(join(file.top, '.walkthrough'), { recursive: true })
   await writeFile(join(file.top, rel), `${JSON.stringify(file, null, 2)}\n`, 'utf8')
   // Out of `git status` without touching a tracked .gitignore.
-  const r = await store.exec('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: file.top }).catch(() => null)
-  const exclude = r?.code === 0 ? join(file.top, r.stdout.trim()) : null
+  // The common git dir's: a worktree's own info/exclude is not read by git.
+  const r = await store.exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: file.top }).catch(() => null)
+  const exclude = r?.code === 0 && r.stdout.trim() ? join(r.stdout.trim(), 'info', 'exclude') : null
   if (exclude) {
     const text = await readFile(exclude, 'utf8').catch(() => '')
     if (!text.split('\n').includes('.walkthrough/')) {
