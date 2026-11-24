@@ -363,6 +363,32 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { path }
   })
 
+  // Asking an agent about a step: this Orca's own terminals and agents, never forwarded.
+  orca.panels.handle('walkthrough.agents', async ({ top, agent }) => {
+    const workspaceId = workspaceOf.get(top)
+    const { agents } = await orca.host.call('agents.list', workspaceId ? { workspaceId } : undefined).catch(() => ({ agents: [] }))
+    const running = agents.filter((a) => a.terminalId).map((a) => ({ terminalId: a.terminalId!, title: a.title, agent: a.agent, state: a.state }))
+    // What can start one: the agents found here, else the one that wrote the walkthrough.
+    const keys = agentsChecked?.filter((a) => a.available).map((a) => a.key) ?? [agent || DEFAULT_AGENT]
+    const launchable = keys.map((key) => ({ key, name: agentOf(key).name }))
+    return { running, launchable }
+  })
+
+  orca.panels.handle('walkthrough.ask', async ({ top, text, terminalId, agent }) => {
+    if (terminalId) {
+      // ponytail: one line, as Enter submits in agent TUIs; a paste API would keep the line breaks.
+      const { accepted } = await orca.host.call('terminal.sendText', { terminalId, text: text.replace(/\s*\n\s*/g, ' · '), enter: true })
+      if (!accepted) throw invalid('The terminal did not take the text.')
+      await orca.host.call('terminal.focus', { terminalId }).catch(() => undefined)
+      return { terminalId }
+    }
+    const workspaceId = workspaceOf.get(top)
+    if (!workspaceId) throw invalid('This workspace is not known yet: reopen the panel.')
+    const launched = await orca.host.call('agent.launch', { workspaceId, agent: agentOf(agent ?? DEFAULT_AGENT).orcaKeys[0] ?? 'claude', prompt: text })
+    await orca.host.call('terminal.focus', { terminalId: launched.terminalId }).catch(() => undefined)
+    return { terminalId: launched.terminalId }
+  })
+
   handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {
     const current = await currentHead(store.exec, top).catch(() => '')
     const [def, choices, commits, metas] = await Promise.all([

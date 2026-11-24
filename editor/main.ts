@@ -306,7 +306,72 @@ function drawStep(s: StepOut): void {
     head,
     el('div', { class: 'prose' }, ...notes, el('p', { class: 'text', text: s.text }), askRow),
     code,
+    askBox(s),
     el('div', { class: 'step-foot' }, markBtn, onward)))
+}
+
+// ── asking an agent about a step ──────────────────────────────────────────
+
+type Agents = { running: { terminalId: string; title: string | null; agent: string | null; state: string }[]; launchable: { key: string; name: string }[] }
+let agentsSeen: Agents | null = null
+const lastTarget = (): string => store.get('wt.tab.askTarget', '')
+
+/** The step, as an agent needs it: what the walkthrough said and where the code is. */
+function stepContext(s: StepOut): string {
+  const where = filesOf(s.hunks).map((f) => {
+    const ranges = s.hunks.filter((h) => h.path === f.path).map((h) => hunksCache.get(h.id)).filter(Boolean)
+      .map((h) => { const n = h!.lines.filter((l) => l[0] !== '-').length; return n > 1 ? `${h!.newStart}-${h!.newStart + n - 1}` : String(h!.newStart) })
+    return ranges.length ? `${f.path}:${ranges.join(',')}` : f.path
+  })
+  return [
+    `About step ${s.position} of the walkthrough "${view!.shown!.title}" (${view!.diff.what})`,
+    `Step: ${s.title}`,
+    `What it says: ${s.text}`,
+    where.length ? `Code: ${where.join('; ')}` : '',
+  ].filter(Boolean).join('\n')
+}
+
+function askBox(s: StepOut): HTMLElement {
+  const question = el('textarea', { class: 'ask-text', rows: '2', placeholder: 'Ask about this step, or tell an agent what to do with it…', 'aria-label': 'Question for the agent' }) as HTMLTextAreaElement
+  const target = el('select', { class: 'ask-target', 'aria-label': 'Agent' }) as HTMLSelectElement
+  const send = el('button', { class: 'btn primary', text: 'Send' }) as HTMLButtonElement
+  const note = el('span', { class: 'dim ask-note', text: 'Sent with the step, its explanation and where its code is.' })
+
+  const fill = (a: Agents): void => {
+    const options: HTMLOptionElement[] = []
+    for (const r of a.running) options.push(el('option', { value: `t:${r.terminalId}`, text: `${r.title || r.agent || 'Agent'} · ${r.state}` }))
+    for (const l of a.launchable) options.push(el('option', { value: `n:${l.key}`, text: `New ${l.name} terminal` }))
+    target.replaceChildren(...options)
+    if (options.some((o) => o.value === lastTarget())) target.value = lastTarget()
+  }
+  if (agentsSeen) fill(agentsSeen)
+  void request<Agents>('walkthrough.agents', { top: file!.top, agent: file!.agent }).then((a) => { agentsSeen = a; fill(a) }).catch(() => {
+    if (!agentsSeen) fill({ running: [], launchable: [{ key: file!.agent || 'claude', name: agentOf(file!.agent || 'claude').name }] })
+  })
+  target.onchange = () => store.put('wt.tab.askTarget', target.value)
+
+  const submit = async (): Promise<void> => {
+    const q = question.value.trim()
+    if (!q || !target.value) { question.focus(); return }
+    send.disabled = true
+    const [kind, id] = [target.value.slice(0, 1), target.value.slice(2)]
+    try {
+      await request('walkthrough.ask', { top: file!.top, text: `${stepContext(s)}\n\n${q}`, ...(kind === 't' ? { terminalId: id } : { agent: id }) }, 60000)
+      question.value = ''
+      note.textContent = kind === 't' ? 'Sent to the agent’s terminal.' : 'Started a new agent with it.'
+      agentsSeen = null
+    } catch (e) {
+      note.textContent = `Could not send: ${message(e)}`
+    }
+    send.disabled = false
+  }
+  send.onclick = () => void submit()
+  question.onkeydown = (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void submit() } }
+
+  return el('section', { class: 'ask' },
+    el('h2', { text: 'Ask an agent about this step' }),
+    question,
+    el('div', { class: 'ask-row-controls' }, target, send, note))
 }
 
 const mark = (a: AskOut): string => (a.coverage === 'seen' ? '✓' : a.coverage === 'partly' ? '◐' : '○')
