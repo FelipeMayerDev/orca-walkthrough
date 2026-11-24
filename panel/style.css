@@ -88,6 +88,7 @@
       .setup { max-width: 640px; margin: 4px auto; display: flex; flex-direction: column; gap: 14px; }
       .setup .counts { color: var(--orca-muted-foreground); font-size: 12px; }
       .setup .counts b { color: var(--orca-foreground); font-weight: 600; }
+      .setup .cmd { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; user-select: all; padding: 10px; border: 1px solid var(--orca-border); border-radius: 8px; margin: 0; }
       .task-box { display: flex; flex-direction: column; gap: 6px; }
       .task-box .modes { display: flex; gap: 6px; flex-wrap: wrap; }
       .task-box .modes button { border-radius: 999px; }

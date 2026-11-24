@@ -108,6 +108,7 @@ async function boot(): Promise<void> {
     hints.hidden = true
     repoLabel.hidden = true
     lastChoices = state.choices
+    if (state.serverSetup) { serverSetup(state.error ?? '', state.serverSetup); return }
     if (!state.workspace && state.choices.length) { pickWorkspace(state.choices); return }
     fail(state.error ?? (state.workspace ? 'The focused workspace is not a git repository.' : 'No workspace is focused in Orca.'))
     return
@@ -139,6 +140,21 @@ function setAction(kind: 'generate' | 'cancel' | 'regenerate'): void {
   const name = kind === 'generate' ? 'Generate' : kind === 'cancel' ? 'Cancel' : 'Regenerate'
   actionButton.title = name
   actionButton.setAttribute('aria-label', name)
+}
+
+/** The workspace is on a paired server without this plugin loaded there: the command that loads it, to run on the server. */
+function serverSetup(why: string, command: string): void {
+  const code = el('pre', { class: 'cmd', text: command })
+  const copy = el('button', { text: 'Copy command', onclick: async () => {
+    try { await navigator.clipboard.writeText(command); status('Command copied: run it in a terminal on the server, approve, then retry.') }
+    catch { getSelection()?.selectAllChildren(code); status('Select the command above and copy it.') }
+  } })
+  main.replaceChildren(el('div', { class: 'setup' },
+    el('div', { class: 'center' }, el('h2', { text: 'Set up Walkthrough on the server' }),
+      el('p', { text: `${why} Run this in a terminal on the server; Orca there asks you to approve it. Then retry.` })),
+    code,
+    el('div', {}, copy, ' ', el('button', { text: 'Retry', onclick: () => { void boot() } }))))
+  status('')
 }
 
 /** The focused workspace could not be matched: offer Orca's workspaces, and remember the choice. */

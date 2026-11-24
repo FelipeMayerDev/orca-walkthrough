@@ -191,6 +191,11 @@ async function orcaCliPath(): Promise<string | null> {
   return null
 }
 let serverWhy = ''
+let serverMissing = false
+// What a server answers when this plugin isn't loaded there for development.
+const NOT_LOADED = /not a loaded development plugin|only reaches development plugins/
+export const SERVER_SETUP =
+  'git clone https://github.com/FelipeMayerDev/orca-walkthrough ~/.local/share/orca-walkthrough && orca plugin dev load ~/.local/share/orca-walkthrough'
 const onServer = new Map<string, string>() // workspace path or repository top → runtime id
 
 async function forward(runtime: string, name: string, input: unknown): Promise<any> {
@@ -224,11 +229,12 @@ async function serverState(workspaceId: string | undefined): Promise<StateAnswer
   if (!workspaceId || at < 0) return null
   const path = workspaceId.slice(at + 2)
   serverWhy = ''
+  serverMissing = false
   const runtimes = await pairedRuntimes()
   if (!runtimes.length) { serverWhy ||= 'no paired Orca server'; return null }
   const why: string[] = []
   for (const runtime of runtimes) {
-    const answer: StateAnswer | null = await forward(runtime, 'walkthrough.state', { path }).catch((e: Error) => { why.push(e.message); return null })
+    const answer: StateAnswer | null = await forward(runtime, 'walkthrough.state', { path }).catch((e: Error) => { why.push(e.message); if (NOT_LOADED.test(e.message)) serverMissing = true; return null })
     if (!answer?.workspace) { if (answer) why.push(`${runtime}: ${answer.error ?? 'unknown path'}`); continue }
     onServer.set(answer.workspace.path, runtime)
     if (answer.repo) onServer.set(answer.repo.top, runtime)
@@ -265,6 +271,12 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!match && !input?.path) {
       const remote = await serverState(context.workspaceId)
       if (remote) return { ...remote, choices: [...remote.choices, ...choices] }
+    }
+    if (!match && serverMissing) {
+      return {
+        workspace: null, repo: null, agents: agentsOf([]), choices: [], serverSetup: SERVER_SETUP,
+        error: `"${context.displayName}" is on a paired Orca server, where Walkthrough is not loaded for development.`,
+      }
     }
     if (!match) {
       return {

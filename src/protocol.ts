@@ -16,6 +16,8 @@ export type StateAnswer = {
   /** The agents whose CLIs can generate, whether each is installed, and the models each offers — Orca's own catalog when it can be read. */
   agents: { key: string; name: string; available: boolean; models: { key: string; label: string; isDefault: boolean }[] }[]
   error: string | null
+  /** The focused workspace is on a paired Orca server without this plugin loaded for development: the command that loads it there. */
+  serverSetup?: string
   /** Every workspace Orca knows, for a manual pick when the focused one can't be matched. */
   choices: WorkspaceInfo[]
 }
