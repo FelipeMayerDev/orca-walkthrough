@@ -145,6 +145,6 @@ ${previousSection(previous ?? null)}${withTask ? taskBlock(task!) : ''}
 The digest: each file starts with "=== path", each hunk with its alias in square brackets and its @@ header, then its lines.
 
 ${digest}`
-  const system = `${SYSTEM}${language === DEFAULT_LANGUAGE ? '' : languageSection(language)}${preferencesSection(preferences)}${withTask ? TASK_RULES : ''}${review ? REVIEW_RULES : ''}`
+  const system = `${SYSTEM}${languageSection(language)}${preferencesSection(preferences)}${withTask ? TASK_RULES : ''}${review ? REVIEW_RULES : ''}`
   return { system, prompt }
 }
