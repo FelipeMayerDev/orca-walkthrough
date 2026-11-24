@@ -277,3 +277,10 @@
         padding-bottom: 4px; border-bottom: 1px solid var(--orca-border);
       }
       .walk .part-head .blurb { margin: 0; color: var(--orca-muted-foreground); font-size: 12px; }
+
+      /* Reading: the reader fills the panel below the header, as in a tab. */
+      main.reading { padding: 0; overflow: hidden; display: flex; }
+      main.reading .reader-host { flex: 1; height: auto; min-height: 0; }
+      main.reading .page { padding: 16px 14px 40px; }
+      main.reading .bar { padding: 6px 12px; gap: 8px; }
+      main.reading .page h1 { font-size: 17px; }

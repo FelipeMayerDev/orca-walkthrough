@@ -232,4 +232,6 @@ body.tab { display: block; height: 100%; background: var(--orca-background); fon
   .bar { padding: 8px 12px; gap: 8px; }
   .bar .count { display: none; }
   .fact { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .ov-actions { align-items: flex-start; }
+  .ov-actions .meta { justify-content: flex-start; }
 }

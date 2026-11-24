@@ -2,12 +2,12 @@
 // and read the change step by step, with the code beside the words.
 
 import type {
-  AskOut, DiffAnswer, EntryMeta, HunkLines, HunkRef, ScopesAnswer, Source, StateAnswer,
-  StepOut, ViewAnswer,
+  ScopesAnswer, Source, StateAnswer, ViewAnswer,
 } from '../src/protocol'
-import { agentOf, modelOf } from '../src/engine/agents'
+import { agentOf } from '../src/engine/agents'
 import { LANGUAGES } from '../src/engine/languages'
-import { buildHunkBlocks, el, filesOf, icon, short } from './render'
+import { el, icon } from './render'
+import { hideReader, mountReader, showReader } from '../editor/reader'
 
 type TaskMode = 'auto' | 'own' | 'off'
 
@@ -55,15 +55,9 @@ let agentsList: StateAnswer['agents'] = []
 let model = store.get('wt.model', '')
 let language = store.get('wt.language', '')
 let view: ViewAnswer | null = null
-let stepPos = 1
-let page: 'walk' | 'task' = 'walk'
-let unreadOnly = false
 let taskMode = store.get<TaskMode>('wt.taskMode', 'auto')
 let taskText = store.get('wt.taskText', '')
-const hunksCache = new Map<string, HunkLines>()
-const uncoveredOpen = new Set<string>()
 let pollTimer: ReturnType<typeof setInterval> | null = null
-let askAnchor: string | null = null
 let lastChoices: { path: string; name: string; branch: string | null }[] = []
 
 const ago = (ms: number): string => {
@@ -74,8 +68,6 @@ const ago = (ms: number): string => {
   return `${Math.floor(s / 86400)} day${Math.floor(s / 86400) === 1 ? '' : 's'} ago`
 }
 
-const steps = (): StepOut[] => view?.parts.flatMap((p) => p.steps) ?? []
-const currentStep = (): StepOut | null => steps().find((s) => s.position === stepPos) ?? null
 
 function status(text: string): void {
   statusLine.textContent = text
@@ -89,6 +81,8 @@ function template(html: string): DocumentFragment {
 }
 
 function fail(message: string): void {
+  hideReader()
+  main.classList.remove('reading')
   main.replaceChildren(el('div', { class: 'center' },
     el('h2', { text: 'Walkthrough' }),
     el('p', { text: message })))
@@ -124,7 +118,7 @@ async function boot(): Promise<void> {
   controls.hidden = false
   hints.hidden = false
   hints.replaceChildren(template(
-    '<kbd>j</kbd>/<kbd>k</kbd> steps · <kbd>x</kbd> read · <kbd>u</kbd> unread · <kbd>t</kbd> task · <kbd>Esc</kbd> back'
+    '<kbd>j</kbd>/<kbd>k</kbd> steps · <kbd>x</kbd> read · <kbd>Esc</kbd> overview'
   ))
   await loadScopes()
 }
@@ -287,41 +281,20 @@ async function loadView(): Promise<void> {
   const before = view
   try { view = await request('walkthrough.view', { top, source, agent, model, language }, { timeoutMs: 60000 }) }
   catch (e) { fail(`Could not read the change: ${message(e)}`); return }
-  hunksCache.clear()
-  const stepList = steps()
-  if (!stepList.some((s) => s.position === stepPos)) {
-    const first = unreadOnly ? stepList.find((s) => !s.read) : stepList[0]
-    stepPos = first?.position ?? 1
-  }
   if (!before?.shown && view.job?.running) startPolling()
   render()
 }
 
 function render(): void {
   if (!view) return
-  if (page === 'task') { renderTaskPage(); return }
   if (!view.shown) {
+    hideReader()
+    main.classList.remove('reading')
     if (view.job?.running) { renderGenerating(); return }
     renderSetup()
     return
   }
   renderWalk()
-}
-
-/** What wrote it: "Codex · GPT-6.1-Sol", or just the Claude model. */
-const byline = (meta: EntryMeta): string => {
-  const agentName = meta.agent && meta.agent !== 'claude' ? `${agentOf(meta.agent).name} · ` : ''
-  const known = agentsList.find((a) => a.key === (meta.agent ?? 'claude'))?.models.find((m) => m.key === meta.model)?.label
-  const modelName = known ?? modelOf(meta.agent ?? 'claude', meta.model).name
-  return `${agentName}${modelName}`
-}
-
-function metaChips(meta: EntryMeta, exact: boolean): HTMLElement {
-  const modelName = byline(meta)
-  const chips = [el('span', { class: 'chip', title: 'Generated' }, `${modelName} · ${ago(meta.generatedAt)}`)]
-  if (typeof meta.cost === 'number') chips.push(el('span', { class: 'chip plain', title: 'What this walkthrough cost' }, `$${meta.cost.toFixed(meta.cost < 0.1 ? 3 : 2)}`))
-  if (!exact) chips.push(el('span', { class: 'chip warn', title: 'The code has changed since this walkthrough was written; steps that no longer match are marked.' }, 'Outdated'))
-  return el('div', { class: 'chips' }, ...chips)
 }
 
 // ── setup (nothing to show yet) ───────────────────────────────────────────
@@ -423,8 +396,6 @@ async function poll(): Promise<void> {
   stopPolling()
   await loadView()
   if (answer.error) status(`Generation failed: ${answer.error}`)
-  // A walkthrough just written is read in its tab.
-  else if (view?.shown) void openTab()
 }
 
 function renderGenerating(startedAt?: number): void {
@@ -449,7 +420,7 @@ async function generate(): Promise<void> {
   try {
     const answer = await request('walkthrough.generate', { top, source, agent, model, language, taskMode, taskText }, { timeoutMs: 60000 })
     if (answer.tooBig) { await loadView(); return }
-    if (answer.cached) { status('Already written for exactly this change — showing it.'); await loadView(); void openTab(); return }
+    if (answer.cached) { status('Already written for exactly this change — showing it.'); await loadView(); return }
     startPolling()
     renderGenerating(Date.now())
   } catch (e) {
@@ -489,235 +460,33 @@ async function copyMarkdown(): Promise<void> {
 
 // ── the walkthrough ───────────────────────────────────────────────────────
 
+// The reader, the same as in a tab: built once, redrawn for each walkthrough.
+let readerHost: HTMLElement | null = null
+function readerIn(): HTMLElement {
+  if (readerHost) return readerHost
+  const rail = el('nav', { class: 'rail', 'aria-label': 'Steps' })
+  const bar = el('div', { class: 'bar' })
+  const page = el('div', { class: 'page' })
+  const announcer = el('p', { class: 'sr-only', role: 'status' })
+  readerHost = el('div', { class: 'app reader-host' }, rail, el('div', { class: 'body' }, bar, page), announcer)
+  mountReader({ rail, bar, page, announcer })
+  return readerHost
+}
+
 function renderWalk(): void {
   const v = view!
-  const shown = v.shown!
   if (v.job?.running) { setAction('cancel'); actionButton.disabled = false } else {
     setAction('regenerate')
     actionButton.disabled = v.diff.hunkCount === 0 || v.diff.tooBig
   }
   copyButton.hidden = false
   openButton.hidden = false
-
-  const walk = el('div', { class: 'walk' })
-  walk.append(
-    el('div', { class: 'head' },
-      el('h2', { text: shown.title }),
-      shown.summary ? el('p', { class: 'summary', text: shown.summary }) : null,
-      metaChips(shown.meta, shown.exact),
-      v.review ? el('div', { class: 'chips' },
-        el('span', { class: `chip score ${v.review.complexity >= 7.5 ? 'high' : v.review.complexity >= 4.5 ? 'medium' : 'low'}`, title: v.review.why }, `Complexity ${v.review.complexity.toFixed(1)}/10`),
-        v.review.risks.length ? el('span', { class: `chip${v.review.risks.some((r) => r.severity === 'high') ? ' bad' : ' warn'}`, title: v.review.risks.map((r) => `${r.severity}: ${r.text}`).join('\n') }, `${v.review.risks.length} risk${v.review.risks.length === 1 ? '' : 's'}`) : null,
-        v.review.contracts.length ? el('span', { class: 'chip', title: v.review.contracts.map((c) => c.text).join('\n') }, `${v.review.contracts.length} contract${v.review.contracts.length === 1 ? '' : 's'} changed`) : null,
-        ...v.review.areas.slice(0, 4).map((a) => el('span', { class: 'chip plain', text: a.name }))) : null,
-      el('button', { class: 'open-tab', onclick: () => void openTab() }, icon('open', 13), 'Read it in a tab, step by step')))
-
-  // The task, and the unread filter, as chips beside the title.
-  const chips = el('div', { class: 'chips' })
-  if (v.task) {
-    chips.append(el('button', { class: 'ask-chip', title: 'Show how the task maps to the change', onclick: () => { page = 'task'; render() } },
-      `${v.asks?.total ?? 0} requests mapped${v.task.changed ? ' · task changed' : ''}`))
-  }
-  if (steps().some((s) => s.read)) {
-    chips.append(el('button', {
-      class: `ask-chip${unreadOnly ? ' seen' : ''}`, 'aria-pressed': String(unreadOnly),
-      title: 'Show only steps not yet read',
-      onclick: () => { unreadOnly = !unreadOnly; store.put('wt.unreadOnly', unreadOnly); render() },
-    }, unreadOnly ? 'unread only' : 'all steps'))
-  }
-  if (chips.childElementCount) walk.append(chips)
-
-  // The whole walkthrough as one document: every part with its steps in
-  // order, the code beside the words; j/k still walk it step by step.
-  for (const part of v.parts) {
-    const list = part.steps.filter((s) => !(unreadOnly && s.read))
-    if (!list.length) continue
-    walk.append(el('div', { class: 'part-head' },
-      el('h3', { text: part.title }),
-      part.blurb ? el('p', { class: 'blurb', text: part.blurb }) : null))
-    for (const s of list) walk.append(stepCard(s))
-  }
-  if (v.uncovered.length) walk.append(uncoveredBlock())
-  main.replaceChildren(walk)
-
-  const stale = v.outdated ? ` · ${v.outdated} step${v.outdated === 1 ? '' : 's'} outdated` : ''
+  const host = readerIn()
+  if (main.firstChild !== host || main.childNodes.length !== 1) main.replaceChildren(host)
+  main.classList.add('reading')
+  showReader({ top: top!, source: source!, agent, model, language }, v)
   const regen = v.job?.running ? ' · regenerating…' : ''
-  status(`${v.diff.what}${stale}${regen}`)
-}
-
-/** The next position each way, honouring the unread-only filter. */
-function beforePos(step: StepOut): number | null {
-  const list = ordered().filter((s) => s.position < step.position)
-  return list.length ? list[list.length - 1]!.position : null
-}
-function afterPos(step: StepOut): number | null {
-  return ordered().find((s) => s.position > step.position)?.position ?? null
-}
-function ordered(): StepOut[] {
-  const all = steps()
-  return unreadOnly ? all.filter((s) => !s.read) : all
-}
-
-function go(position: number): void {
-  stepPos = position
-  page = 'walk'
-  render()
-  scrollToStep(position)
-}
-
-/** Put one step of the document at the top of the panel. */
-function scrollToStep(position: number): void {
-  main.querySelector(`.step[data-position="${position}"]`)?.scrollIntoView({ block: 'start' })
-}
-
-function stepCard(step: StepOut): HTMLElement {
-  const card = el('div', { class: 'step', 'data-position': String(step.position) })
-  const weight = step.weight === 'key' ? el('span', { class: 'chip', text: 'Key change' }) : step.weight === 'skim' ? el('span', { class: 'chip', text: 'Context' }) : null
-  const markBtn = el('button', { class: `mark${step.read ? ' on' : ''}`, title: 'Mark read (x)' }, step.read ? '✓ Read' : 'Mark read')
-  markBtn.onclick = () => void toggleRead(step)
-  card.append(el('div', { class: 'title-row' }, el('h3', { text: `${step.position}. ${step.title}` }), weight, markBtn))
-
-  // The files this step summarizes, each saying what moved in it; a chip
-  // jumps to that file's code below.
-  const files = filesOf(step.hunks)
-  if (files.length) {
-    const chips = el('div', { class: 'files-chips' })
-    files.slice(0, 4).forEach((f, i) => {
-      const chip = el('button', { class: 'file-chip', title: f.path },
-        el('span', { class: 'path', text: f.path }),
-        el('span', { class: 'a', text: `+${f.added}` }),
-        el('span', { class: 'd', text: `−${f.deleted}` }))
-      chip.onclick = () => card.querySelector(`[data-file="${i}"]`)?.scrollIntoView({ block: 'start' })
-      chips.append(chip)
-    })
-    if (files.length > 4) chips.append(el('span', { class: 'file-chip more', text: `+${files.length - 4} more` }))
-    card.append(chips)
-  }
-
-  // The requests this step carries out.
-  const asks = view?.asks?.list.filter((a) => a.steps.includes(step.position)) ?? []
-  if (asks.length) {
-    const chips = el('div', { class: 'asks-chips' })
-    for (const a of asks) chips.append(el('button', { class: `ask-chip ${a.coverage}`, title: 'Show the task', onclick: () => { page = 'task'; askAnchor = a.id; render() } }, `${mark(a)} ${short(a.text, 42)}`))
-    card.append(chips)
-  }
-
-  for (const n of step.notes) card.append(el('div', { class: `note ${n.kind}` }, el('b', { text: n.kind }), el('span', { text: n.text })))
-  card.append(el('p', { class: 'text', text: step.text }))
-  if (step.outdated) card.append(el('div', { class: 'note gap' }, el('b', { text: 'outdated' }), el('span', { text: `${step.missing} of the ${step.hunks.length + step.missing} hunk${step.hunks.length + step.missing === 1 ? '' : 's'} this step described changed or are gone.` })))
-
-  const code = el('div', { class: 'step-code' })
-  card.append(code)
-  void renderHunkBlocks(code, step.hunks)
-  return card
-}
-
-const mark = (a: AskOut): string => (a.coverage === 'seen' ? '✓' : a.coverage === 'partly' ? '◐' : '○')
-
-async function toggleRead(step: StepOut): Promise<void> {
-  if (!top) return
-  const ids = step.hunks.map((h) => h.id)
-  try {
-    const { read } = await request('walkthrough.read.mark', { top, ids, on: !step.read }, { timeoutMs: 15000 })
-    for (const s of steps()) s.read = s.hunks.length > 0 && s.hunks.every((h) => Object.hasOwn(read, h.id.slice(h.id.indexOf(':') + 1))) && !s.outdated
-    if (unreadOnly && step.read && afterPos(step)) { stepPos = afterPos(step)! }
-    render()
-  } catch (e) {
-    status(`Could not save the read mark: ${message(e)}`)
-  }
-}
-
-// ── code ──────────────────────────────────────────────────────────────────
-
-async function fetchHunks(ids: string[]): Promise<void> {
-  const missing = [...new Set(ids)].filter((id) => !hunksCache.has(id))
-  if (!missing.length || !top || !source) return
-  try {
-    const { hunks } = await request('walkthrough.hunks', { top, source, ids: missing }, { timeoutMs: 30000 })
-    for (const [id, h] of Object.entries(hunks)) hunksCache.set(id, h)
-  } catch { /* the block stays collapsed */ }
-}
-
-/** Hunk refs → code blocks, with their lines fetched on demand. */
-async function renderHunkBlocks(container: HTMLElement, refs: HunkRef[], perFile = true): Promise<void> {
-  const placeholder = el('div', { class: 'center', text: '…' })
-  container.replaceChildren(placeholder)
-  await fetchHunks(refs.map((r) => r.id))
-  const blocks = buildHunkBlocks(refs, (id) => hunksCache.get(id), perFile)
-  container.replaceChildren(...(blocks.length ? blocks : [el('div', { class: 'center', text: 'Nothing to show.' })]))
-}
-
-// ── not covered ───────────────────────────────────────────────────────────
-
-function uncoveredBlock(): HTMLElement {
-  const v = view!
-  const box = el('div', { class: 'uncovered' })
-  box.append(el('h3', { text: `Not covered — edits in ${v.uncovered.length} file${v.uncovered.length === 1 ? '' : 's'} no step explains` }))
-  for (const u of v.uncovered) {
-    const file = el('div', { class: 'uc-file' })
-    const head = el('button', {},
-      el('span', { class: 'path', text: u.path }),
-      el('span', { class: 'note', text: u.note || u.unread || (u.binary ? 'Binary file.' : u.generated ? 'Generated file, not sent to the model.' : '') }),
-      el('span', { class: 'count dim', text: u.hunks.length ? `${u.hunks.length} hunk${u.hunks.length === 1 ? '' : 's'}` : 'no hunks' }))
-    const body = el('div', { class: 'body', hidden: true })
-    head.onclick = () => {
-      const open = body.hidden
-      body.hidden = !open
-      if (open) {
-        uncoveredOpen.add(u.path)
-        if (!body.childNodes.length) void renderHunkBlocks(body, u.hunks, false)
-      } else uncoveredOpen.delete(u.path)
-    }
-    file.append(head, body)
-    if (uncoveredOpen.has(u.path)) head.click()
-    box.append(file)
-  }
-  return box
-}
-
-// ── the task page ─────────────────────────────────────────────────────────
-
-function renderTaskPage(): void {
-  const v = view!
-  const task = v.task
-  const box = el('div', { class: 'task-page' })
-  box.append(el('h3', { text: 'The task, against the change' }))
-  if (task) box.append(el('div', { class: 'task-found' }, el('b', { text: `${task.label}. ` }), task.text))
-  else box.append(el('p', { class: 'counts', text: 'This walkthrough was written without a task.' }))
-  const asks = v.asks
-  if (!asks) {
-    box.append(el('p', { class: 'counts', text: 'Regenerate with a task to see which requests the change carries out.' }))
-  } else if (!asks.list.length) {
-    box.append(el('p', { class: 'counts', text: 'The task names nothing concrete to match against the change.' }))
-  } else {
-    for (const a of asks.list) {
-      const where = [
-        a.coverage === 'absent' ? 'not in this diff' : '',
-        a.steps.length ? `step${a.steps.length === 1 ? '' : 's'} ${a.steps.join(', ')}` : '',
-        a.tail ? 'partly under Not covered' : '',
-        a.outdated ? 'changed since' : '',
-      ].filter(Boolean).join(' · ')
-    const stepsRow = el('div', { class: 'where' })
-    if (a.steps.length) {
-      for (const p of a.steps) stepsRow.append(el('button', { text: `step ${p}`, onclick: () => go(p) }), ' ')
-    }
-    if (where) stepsRow.append(where)
-    const row = el('div', { class: 'ask-row', id: a.id },
-      el('div', { class: 'top' }, el('span', { class: `mark ${a.coverage}`, text: mark(a) }), el('span', { text: a.text })))
-    if (stepsRow.childNodes.length) row.append(stepsRow)
-    box.append(row)
-    }
-    if (asks.outside.length) box.append(el('p', { class: 'counts', text: `Not tied to any request: step${asks.outside.length === 1 ? '' : 's'} ${asks.outside.join(', ')}.` }))
-  }
-  const back = el('button', { class: 'ghost', text: '← Back to the walkthrough (Esc)' })
-  back.onclick = () => { page = 'walk'; askAnchor = null; render() }
-  box.append(back)
-  main.replaceChildren(box)
-  status(v.diff.what)
-  if (askAnchor) {
-    document.getElementById(askAnchor)?.scrollIntoView({ block: 'center' })
-    askAnchor = null
-  }
+  status(`${v.diff.what}${regen}`)
 }
 
 // ── wiring ────────────────────────────────────────────────────────────────
@@ -728,37 +497,6 @@ actionButton.onclick = () => {
 }
 copyButton.onclick = () => void copyMarkdown()
 openButton.onclick = () => void openTab()
-
-document.addEventListener('keydown', (event) => {
-  if (event.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return
-  if (event.metaKey || event.ctrlKey || event.altKey) return
-  const step = currentStep()
-  switch (event.key) {
-    case 'j': case 'ArrowRight': case 'ArrowDown':
-      if (step && afterPos(step)) { go(afterPos(step)!); event.preventDefault() }
-      break
-    case 'k': case 'ArrowLeft': case 'ArrowUp':
-      if (step && beforePos(step)) { go(beforePos(step)!); event.preventDefault() }
-      break
-    case 'x':
-      if (step && page === 'walk') void toggleRead(step)
-      break
-    case 'u': {
-      unreadOnly = !unreadOnly
-      store.put('wt.unreadOnly', unreadOnly)
-      const first = ordered()[0]
-      if (first) stepPos = first.position
-      render()
-      break
-    }
-    case 't':
-      if (view?.shown) { page = page === 'task' ? 'walk' : 'task'; render() }
-      break
-    case 'Escape':
-      if (page === 'task') { page = 'walk'; render() }
-      break
-  }
-})
 
 // Model and language live behind the sliders; the scope stays in the open.
 copyButton.replaceChildren(icon('copy'))
@@ -797,7 +535,6 @@ orca.on('workspace.changed', ({ context }) => {
 })
 
 void (async () => {
-  unreadOnly = store.get('wt.unreadOnly', false)
   await fillSettings() // a quiet first draw, before the worker has answered
   await boot()
   await fillSettings() // now with the agents Orca has enabled
