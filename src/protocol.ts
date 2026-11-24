@@ -126,8 +126,8 @@ export type MarkdownAnswer = { text: string }
 
 declare module 'orca' {
   interface PluginRequests {
-    /** The focused workspace, its repository, and the agents whose CLIs can generate. `pick`: a workspace chosen by hand when matching failed. */
-    'walkthrough.state': { input: { pick?: string }; output: StateAnswer }
+    /** The focused workspace, its repository, and the agents whose CLIs can generate. `pick`: a workspace chosen by hand when matching failed; `path`: read this workspace whatever is focused (a client forwarding to this server). */
+    'walkthrough.state': { input: { pick?: string; path?: string }; output: StateAnswer }
     /** What there is to read: branches, commits and pull requests. */
     'walkthrough.scopes': { input: { top: string }; output: ScopesAnswer }
     /** A source's diff as it is now, without hunk contents. */

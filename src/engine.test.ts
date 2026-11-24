@@ -2,6 +2,7 @@
 // safe, the overlay over a changed diff, and the transcript reader.
 
 import { assert, test } from 'orca/testing'
+import { matchFocused } from './workspace'
 import { parseDiff, headerPath, unquote, numberLines } from './engine/hunks'
 import { jobScript, readOutcome, isRunCommand } from './engine/job'
 import { agentOf, modelOf, agentsEnabled } from './engine/agents'
@@ -644,4 +645,11 @@ test('parseTranscript bounds a turn at both ends', () => {
   const text = [line(1000, 'in the middle', 'u1'), line(2000, 'too late', 'u2'), line(500, 'too early', 'u3')].join('\n')
   const prompts = parseTranscript(text, { top: '/repo', since: 800, until: 1500 })
   assert.deepEqual(prompts.map((p) => p.text), ['in the middle'])
+})
+
+test('matchFocused: the id tells apart one repository listed on two hosts', () => {
+  const local = { id: 'a::/w', name: 'Walkthough', path: '/w', branch: 'refs/heads/x' }
+  const server = { id: 'b::/w', name: 'Walkthough', path: '/w', branch: 'refs/heads/x' }
+  assert.equal(matchFocused({ workspaceId: 'b::/w', branch: 'x', displayName: 'Walkthough' }, [local, server]), server)
+  assert.equal(matchFocused({ branch: 'x', displayName: 'Walkthough' }, [local, server]), null)
 })

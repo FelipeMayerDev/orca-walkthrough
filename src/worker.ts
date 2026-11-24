@@ -7,7 +7,7 @@ import type { OrcaWorkerApi, PluginEvents } from 'orca/worker'
 import './protocol'
 import { homedir } from 'node:os'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { matchFocused } from './workspace'
 import * as store from './store'
 import {
@@ -157,7 +157,32 @@ function diffAnswer(diff: store.Diff): DiffAnswer {
 const hunkRef = (id: string, header: string, added: number, deleted: number, path: string, status: string, scope: string): HunkRef =>
   ({ id, header, added, deleted, path, status, scope })
 
+// A workspace on a paired Orca server (`runtime:…`) has its files there, not
+// here: its requests are forwarded to this plugin's worker on that server.
+// ponytail: through the CLI's `plugin dev request`, which reaches only a dev
+// plugin keyed `local.walkthrough`; a host API for it would replace this.
+const SERVER_PLUGIN = 'local.walkthrough'
+const orcaCli = (): string => process.env.ORCA_CLI
+  ?? (process.platform === 'win32' ? join(dirname(process.execPath), 'resources', 'bin', 'orca.exe') : 'orca')
+const onServer = new Map<string, string>() // workspace path or repository top → runtime id
+
+async function forward(runtime: string, name: string, input: unknown): Promise<any> {
+  const r = await store.exec(orcaCli(), [
+    'plugin', 'dev', 'request', SERVER_PLUGIN, name, '--data', JSON.stringify(input ?? {}),
+    '--panel', 'walkthrough', '--environment', runtime, '--timeout-ms', '120000',
+  ])
+  if (r.code !== 0) throw new Error(`Orca server ${runtime}: ${(r.stderr || r.stdout).trim()}`)
+  return JSON.parse(r.stdout)
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
+  // Every handler but the state one is keyed by `top`: a server's top goes there.
+  const handle = ((name: string, fn: (input: any) => unknown) =>
+    orca.panels.handle(name as never, (async (input: any) => {
+      const runtime = typeof input?.top === 'string' ? onServer.get(input.top) : undefined
+      return runtime ? forward(runtime, name, input) : fn(input)
+    }) as never)) as typeof orca.panels.handle
+
   orca.panels.handle('walkthrough.state', async (input): Promise<StateAnswer> => {
     const pick = input?.pick || ''
     const context = await orca.host.call('workspace.readContext').catch(() => null)
@@ -165,10 +190,12 @@ export default function activate(orca: OrcaWorkerApi): void {
     const { workspaces } = await orca.host.call('workspace.list')
     // Name and branch first, then the name alone, then a unique branch match (a
     // folder whose display name differs from its folder name still reads).
-    let match = matchFocused({ branch: context.branch, displayName: context.displayName }, workspaces)
+    let match = matchFocused(context, workspaces)
       ?? (workspaces.filter((w) => (w.branch ?? '').replace(/^refs\/heads\//, '') === context.branch).length === 1
         ? workspaces.find((w) => (w.branch ?? '').replace(/^refs\/heads\//, '') === context.branch)! : null)
       ?? null
+    // A forwarding client names the workspace outright.
+    if (input?.path) match = workspaces.find((w) => w.path === input.path) ?? null
     // A reader's explicit choice overrides only when matching failed.
     if (!match && pick) match = workspaces.find((w) => w.path === pick) ?? null
     const choices = workspaces.map((w) => ({ path: w.path, name: w.name, branch: w.branch ?? null }))
@@ -177,6 +204,13 @@ export default function activate(orca: OrcaWorkerApi): void {
         workspace: null, repo: null, agents: agentsOf([]), choices,
         error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below.`,
       }
+    }
+    const runtime = match.hostId?.startsWith('runtime:') ? match.hostId.slice('runtime:'.length) : null
+    if (runtime) {
+      const answer: StateAnswer = await forward(runtime, 'walkthrough.state', { path: match.path })
+      onServer.set(match.path, runtime)
+      if (answer.repo) onServer.set(answer.repo.top, runtime)
+      return { ...answer, choices }
     }
     if (agentsChecked === undefined) {
       // Which agents Orca has enabled, and what each offers: its own profile
@@ -196,12 +230,14 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     const repo = await store.repository(match.path)
     return {
-      workspace: { path: match.path, name: context.displayName, branch: context.branch || null },
+      workspace: input?.path
+        ? { path: match.path, name: match.name, branch: match.branch?.replace(/^refs\/heads\//, '') || null }
+        : { path: match.path, name: context.displayName, branch: context.branch || null },
       repo, agents: agentsOf(agentsChecked), error: null, choices,
     }
   })
 
-  orca.panels.handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {
+  handle('walkthrough.scopes', async ({ top }): Promise<ScopesAnswer> => {
     const current = await currentHead(store.exec, top).catch(() => '')
     const [def, choices, commits, metas] = await Promise.all([
       defaultBase(store.exec, top, current || null),
@@ -226,12 +262,12 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { current, defaultBase: def, bases: choices, commits, pulls, prError, turns }
   })
 
-  orca.panels.handle('walkthrough.diff', async ({ top, source }): Promise<DiffAnswer> => {
+  handle('walkthrough.diff', async ({ top, source }): Promise<DiffAnswer> => {
     const repo = await repoOf(top)
     return diffAnswer(await store.readDiff(repo, source))
   })
 
-  orca.panels.handle('walkthrough.view', async ({ top, source, agent, model, language }): Promise<ViewAnswer> => {
+  handle('walkthrough.view', async ({ top, source, agent, model, language }): Promise<ViewAnswer> => {
     const repo = await repoOf(top)
     const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
     const chosenAgent = agentOf(agent ?? defAgent)
@@ -289,7 +325,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
 
-  orca.panels.handle('walkthrough.hunks', async ({ top, source, ids }) => {
+  handle('walkthrough.hunks', async ({ top, source, ids }) => {
     const repo = await repoOf(top)
     const diff = await store.readDiff(repo, source)
     const index = indexHunks(diff.files)
@@ -301,9 +337,9 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { hunks }
   })
 
-  orca.panels.handle('walkthrough.task', async ({ top, source }) => ({ task: await taskFor(top, source) }))
+  handle('walkthrough.task', async ({ top, source }) => ({ task: await taskFor(top, source) }))
 
-  orca.panels.handle('walkthrough.generate', async ({ top, source, agent, model, language, taskMode, taskText }): Promise<GenerateAnswer> => {
+  handle('walkthrough.generate', async ({ top, source, agent, model, language, taskMode, taskText }): Promise<GenerateAnswer> => {
     const repo = await repoOf(top)
     const { agent: defAgent, model: defModel, language: defLanguage, preferences } = await settings(orca)
     const chosenAgent = agentOf(agent ?? defAgent)
@@ -331,7 +367,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { cached: false, key, promptChars: store.promptChars(prompt) }
   })
 
-  orca.panels.handle('walkthrough.poll', async ({ top, source }): Promise<PollAnswer> => {
+  handle('walkthrough.poll', async ({ top, source }): Promise<PollAnswer> => {
     const repo = await repoOf(top)
     const job = await store.jobOf(repo, sourceKey(source))
     if (!job) return { running: false, entry: null, error: null }
@@ -346,18 +382,18 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   })
 
-  orca.panels.handle('walkthrough.cancel', async ({ top, source }) => {
+  handle('walkthrough.cancel', async ({ top, source }) => {
     const repo = await repoOf(top)
     const job = await store.jobOf(repo, sourceKey(source))
     if (job) await store.cancelJob(job)
     return { cancelled: true }
   })
 
-  orca.panels.handle('walkthrough.read.load', async ({ top }) => ({ read: await store.loadRead(top) }))
+  handle('walkthrough.read.load', async ({ top }) => ({ read: await store.loadRead(top) }))
 
-  orca.panels.handle('walkthrough.read.mark', async ({ top, ids, on }) => ({ read: await store.saveRead(top, ids, on) }))
+  handle('walkthrough.read.mark', async ({ top, ids, on }) => ({ read: await store.saveRead(top, ids, on) }))
 
-  orca.panels.handle('walkthrough.markdown', async ({ top, source }) => {
+  handle('walkthrough.markdown', async ({ top, source }) => {
     const repo = await repoOf(top)
     const { agent, model, language } = await settings(orca)
     const diff = await store.readDiff(repo, source)
@@ -370,7 +406,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { text: toMarkdown(view, shown.entry.walkthrough, { what: diff.what, agent: shown.entry.agent ?? 'claude', model: shown.entry.model, language: shown.entry.language, cost: shown.entry.cost }, asks, shown.entry.task?.label ?? '') }
   })
 
-  orca.panels.handle('walkthrough.clipboard', async ({ text }) => {
+  handle('walkthrough.clipboard', async ({ text }) => {
     await store.copyText(text)
     return { copied: true }
   })
@@ -456,7 +492,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       const context = await orca.host.call('workspace.readContext')
       if (!context) return
       const { workspaces } = await orca.host.call('workspace.list')
-      const match = matchFocused({ branch: context.branch, displayName: context.displayName }, workspaces)
+      const match = matchFocused(context, workspaces)
         ?? workspaces.find((w) => (w.branch ?? '').replace(/^refs\/heads\//, '') === context.branch)
       if (!match) return
       const { agents } = await orca.host.call('agents.list')
