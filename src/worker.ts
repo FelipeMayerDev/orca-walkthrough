@@ -169,18 +169,22 @@ const cliCandidates = (): string[] => [
     ? [
         join(dirname(process.execPath), 'resources', 'bin', 'orca.exe'),
         join(dirname(process.execPath), '..', 'bin', 'orca.exe'),
-        process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs', 'orca', 'resources', 'bin', 'orca.exe'),
+        join(cliEnv().LOCALAPPDATA ?? '', 'Programs', 'orca', 'resources', 'bin', 'orca.exe'),
         'orca.exe',
       ]
     : ['orca', 'orca-ide']),
 ].filter((c): c is string => Boolean(c))
+// The worker's environment is stripped: the CLI still needs Windows' profile folders.
+const cliEnv = (): Record<string, string> => process.platform === 'win32'
+  ? { APPDATA: process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), LOCALAPPDATA: process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local') }
+  : {}
 let cliFound: string | undefined
 let cliTried = ''
 async function orcaCliPath(): Promise<string | null> {
   if (cliFound) return cliFound
   const tried: string[] = []
   for (const c of cliCandidates()) {
-    const r = await store.exec(c, ['--version']).catch((e: Error) => { tried.push(`${c}: ${e.message}`); return null })
+    const r = await store.exec(c, ['--version'], { env: cliEnv() }).catch((e: Error) => { tried.push(`${c}: ${e.message}`); return null })
     if (r) { cliFound = c; return c }
   }
   cliTried = `execPath ${process.execPath}; ${tried.join('; ')}`
@@ -195,7 +199,7 @@ async function forward(runtime: string, name: string, input: unknown): Promise<a
   const r = await store.exec(cli, [
     'plugin', 'dev', 'request', SERVER_PLUGIN, name, '--data', JSON.stringify(input ?? {}),
     '--panel', 'walkthrough', '--environment', runtime, '--timeout-ms', '120000',
-  ])
+  ], { env: cliEnv() })
   if (r.code !== 0) throw new Error(`Orca server ${runtime}: ${(r.stderr || r.stdout).trim()}`)
   return JSON.parse(r.stdout)
 }
@@ -205,7 +209,7 @@ async function forward(runtime: string, name: string, input: unknown): Promise<a
 async function pairedRuntimes(): Promise<string[]> {
   const cli = await orcaCliPath()
   if (!cli) { serverWhy = `Orca CLI not found (${cliTried})`; return [] }
-  const r = await store.exec(cli, ['worktree', 'list', '--json']).catch((e: Error) => { serverWhy = e.message; return null })
+  const r = await store.exec(cli, ['worktree', 'list', '--json'], { env: cliEnv() }).catch((e: Error) => { serverWhy = e.message; return null })
   if (!r || r.code !== 0) { serverWhy ||= `worktree list: ${r?.stderr || r?.stdout}`; return [] }
   try {
     const scope = JSON.parse(r.stdout)?.result?.hostScope ?? {}
