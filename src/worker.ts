@@ -202,7 +202,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!match) {
       return {
         workspace: null, repo: null, agents: agentsOf([]), choices,
-        error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below.`,
+        error: `Could not match the focused workspace "${context.displayName}" to exactly one workspace in Orca. Pick one below. (id ${context.workspaceId ?? 'none'}; listed: ${workspaces.filter((w) => w.name === context.displayName).map((w) => `${w.id} @ ${w.hostId}`).join(', ') || 'none by that name'})`,
       }
     }
     const runtime = match.hostId?.startsWith('runtime:') ? match.hostId.slice('runtime:'.length) : null

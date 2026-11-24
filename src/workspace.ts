@@ -20,6 +20,11 @@ export function matchFocused<W extends Listed>(
   if (context.workspaceId) {
     const byId = workspaces.find((workspace) => workspace.id === context.workspaceId)
     if (byId) return byId
+    // A client may name a server's workspace with its own prefix
+    // (`identity:wt2:runtime:<server>:<uuid>`): the trailing uuid still tells.
+    const tail = (id: string): string => id.slice(id.lastIndexOf(':') + 1)
+    const byTail = workspaces.filter((workspace) => workspace.id && tail(workspace.id) === tail(context.workspaceId!))
+    if (byTail.length === 1) return byTail[0] ?? null
   }
   const named = workspaces.filter((workspace) => workspace.name === context.displayName)
   const exact = named.filter(

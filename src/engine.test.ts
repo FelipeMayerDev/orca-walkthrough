@@ -653,3 +653,8 @@ test('matchFocused: the id tells apart one repository listed on two hosts', () =
   assert.equal(matchFocused({ workspaceId: 'b::/w', branch: 'x', displayName: 'Walkthough' }, [local, server]), server)
   assert.equal(matchFocused({ branch: 'x', displayName: 'Walkthough' }, [local, server]), null)
 })
+
+test('matchFocused: a client-prefixed id still finds the workspace by its uuid', () => {
+  const w = { id: 'identity:wt2:local:u1', name: 'a', path: '/a', branch: null }
+  assert.equal(matchFocused({ workspaceId: 'identity:wt2:runtime:srv:u1', branch: '', displayName: 'x' }, [w]), w)
+})
