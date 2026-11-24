@@ -423,6 +423,8 @@ async function poll(): Promise<void> {
   stopPolling()
   await loadView()
   if (answer.error) status(`Generation failed: ${answer.error}`)
+  // A walkthrough just written is read in its tab.
+  else if (view?.shown) void openTab()
 }
 
 function renderGenerating(startedAt?: number): void {
@@ -447,7 +449,7 @@ async function generate(): Promise<void> {
   try {
     const answer = await request('walkthrough.generate', { top, source, agent, model, language, taskMode, taskText }, { timeoutMs: 60000 })
     if (answer.tooBig) { await loadView(); return }
-    if (answer.cached) { status('Already written for exactly this change — showing it.'); await loadView(); return }
+    if (answer.cached) { status('Already written for exactly this change — showing it.'); await loadView(); void openTab(); return }
     startPolling()
     renderGenerating(Date.now())
   } catch (e) {
